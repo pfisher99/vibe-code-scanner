@@ -100,6 +100,10 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(raw_payload["choices"][0]["message"]["content"], '{"findings":[]}')
         self.assertIsNotNone(trace)
         self.assertEqual(trace.request_messages, messages)
+        self.assertEqual(trace.request_message_count, 1)
+        self.assertGreater(trace.request_char_count, 0)
+        self.assertEqual(trace.response_char_count, len('{"findings":[]}'))
+        self.assertGreaterEqual(len(trace.steps), 2)
 
 
 if __name__ == "__main__":

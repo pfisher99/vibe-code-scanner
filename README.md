@@ -17,7 +17,7 @@ TOML is used for configuration because Python 3.11 ships `tomllib` in the standa
 - Per-chunk raw artifacts, per-file markdown reports, top-level summary markdown, and `findings.json`
 - Retry and timeout handling with partial-run completion
 - Local path scans or public GitHub repo scans via `git clone`
-- Optional per-chunk trace artifacts for local debugging
+- Optional slot-based trace logging plus per-chunk and run-level trace artifacts for local debugging
 - Optional final research pass where the model inspects the completed scan outputs and can use web lookup tools when configured
 
 ## Install
@@ -42,7 +42,7 @@ To scan a public GitHub repository directly from the CLI:
 vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --ref master --config scanner.example.toml --scan-mode security --max-concurrency 4
 ```
 
-To keep full per-chunk prompt traces:
+To keep slot-based trace logging and rich raw trace artifacts:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --trace
@@ -126,6 +126,8 @@ scan-runs/
       files/
         src/
           app.py.json
+      trace/
+        events.jsonl
       research/
         final-report.json
 ```
@@ -164,3 +166,4 @@ usage: vibe-code-scanner [-h] [--config CONFIG] [--output OUTPUT]
 - Optional web search still supports SearXNG if you want to point at your own instance.
 - The scanner system prompt lives in [src/vibe_code_scanner/scanner_system_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_system_prompt.txt) so you can tweak it without editing the Python prompt builder.
 - The post-scan research-agent prompt lives in [src/vibe_code_scanner/scanner_research_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_research_prompt.txt).
+- `--trace` now does three things: prints step-by-step trace lines with request slot ids in the terminal, stores rich per-chunk trace metadata in `raw/chunks/*.json`, and writes a run-level event stream to `raw/trace/events.jsonl`.

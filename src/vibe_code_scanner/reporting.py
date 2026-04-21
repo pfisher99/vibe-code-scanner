@@ -23,6 +23,7 @@ def initialize_run_dir(export_dir: Path, run_id: str) -> Path:
     (run_dir / "raw" / "chunks").mkdir(parents=True, exist_ok=True)
     (run_dir / "raw" / "files").mkdir(parents=True, exist_ok=True)
     (run_dir / "raw" / "research").mkdir(parents=True, exist_ok=True)
+    (run_dir / "raw" / "trace").mkdir(parents=True, exist_ok=True)
     return run_dir
 
 
@@ -228,6 +229,7 @@ def write_index_markdown(
         f"- Total files skipped: `{summary.total_files_skipped}`",
         f"- Total chunks sent: `{summary.total_chunks_sent}`",
         f"- Research enabled: `{summary.research_enabled}`",
+        f"- Trace enabled: `{summary.trace_enabled}`",
         "",
         "## Findings By Severity",
         "",
@@ -256,6 +258,16 @@ def write_index_markdown(
         if research_summary and research_summary.report_path is not None:
             report_link = research_summary.report_path.relative_to(run_dir).as_posix()
             lines.append(f"- Report: [{report_link}]({report_link})")
+
+    if summary.trace_enabled:
+        lines.extend(
+            [
+                "",
+                "## Trace",
+                "",
+                "- Run event stream: [raw/trace/events.jsonl](raw/trace/events.jsonl)",
+            ]
+        )
 
     for severity in SEVERITY_ORDER:
         lines.append(f"- {severity}: `{summary.findings_by_severity.get(severity, 0)}`")
@@ -345,6 +357,15 @@ def _trace_to_dict(trace) -> dict | None:
         return None
     return {
         "request_messages": trace.request_messages,
+        "trace_label": trace.trace_label,
+        "slot_id": trace.slot_id,
+        "request_message_count": trace.request_message_count,
+        "request_char_count": trace.request_char_count,
+        "response_char_count": trace.response_char_count,
+        "started_at": trace.started_at,
+        "finished_at": trace.finished_at,
+        "duration_ms": trace.duration_ms,
+        "steps": trace.steps,
     }
 
 

@@ -71,6 +71,15 @@ Source code:
 {chunk.text}
 ```"""
 
+    user_prompt += """
+
+Important response rules:
+- Return one JSON object only.
+- Use only the allowed category, severity, and confidence values.
+- If line numbers are unclear, use 0 for unknown values instead of guessing wildly.
+- Do not include explanatory text before or after the JSON object.
+- If the chunk looks safe or uncertain, prefer {"findings": []} over a weak claim."""
+
     return [
         {"role": "system", "content": load_system_prompt()},
         {"role": "user", "content": user_prompt},

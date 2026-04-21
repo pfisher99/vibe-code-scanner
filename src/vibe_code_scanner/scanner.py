@@ -38,6 +38,7 @@ from .reporting import (
     write_research_report,
 )
 from .tokenization import TokenizationError
+from .tracing import TraceRecorder, append_trace_step
 
 LOGGER = logging.getLogger("vibe_code_scanner")
 
@@ -50,6 +51,7 @@ class RepositoryScanner:
         self._total_files = 0
         self._completed_files = 0
         self._eligible_files_before_limit = 0
+        self._trace_recorder: TraceRecorder | None = None
         self._source_metadata = source_metadata or ScanSourceMetadata(
             kind=ScanSourceKind.LOCAL_PATH,
             label=str(config.root_path),
@@ -59,6 +61,13 @@ class RepositoryScanner:
         started_at = datetime.now(timezone.utc)
         run_id = started_at.astimezone().strftime("%Y%m%d-%H%M%S")
         run_dir = initialize_run_dir(self._config.export_dir, run_id)
+        self._trace_recorder = TraceRecorder(
+            run_dir,
+            enabled=self._config.trace_enabled,
+            logger=LOGGER,
+            max_slots=self._config.max_concurrent_requests,
+        )
+        await self._trace("scan_started", label=self._source_metadata.label, run_id=run_id)
 
         source_files, skipped_paths = discover_source_files(self._config)
         self._eligible_files_before_limit = len(source_files)
@@ -66,6 +75,12 @@ class RepositoryScanner:
         self._total_files = len(source_files)
         self._completed_files = 0
         LOGGER.info("Discovered %s files and skipped %s paths.", len(source_files), len(skipped_paths))
+        await self._trace(
+            "discovery_completed",
+            label=self._source_metadata.label,
+            file_count=len(source_files),
+            skipped_count=len(skipped_paths),
+        )
 
         client = OpenAICompatibleClient(self._config)
         tasks = [asyncio.create_task(self._scan_file(run_dir, client, source_file)) for source_file in source_files]
@@ -73,10 +88,12 @@ class RepositoryScanner:
         research_summary = None
         if self._config.research_enabled:
             LOGGER.info("Running post-scan research loop.")
+            await self._trace("research_started", label=self._source_metadata.label)
             research_summary = await PostScanResearcher(self._config).run(
                 client,
                 file_results,
                 self._source_metadata,
+                trace_recorder=self._trace_recorder,
             )
             research_summary.raw_artifact_path = write_research_artifact(run_dir, research_summary)
             research_summary.report_path = write_research_report(run_dir, research_summary)
@@ -94,6 +111,14 @@ class RepositoryScanner:
 
         write_findings_json(run_dir, summary, file_results, research_summary=research_summary)
         write_index_markdown(run_dir, summary, file_results, research_summary=research_summary)
+        await self._trace(
+            "scan_finished",
+            label=self._source_metadata.label,
+            status="ok",
+            scanned_files=summary.total_files_scanned,
+            total_chunks=summary.total_chunks_sent,
+            error_count=len(summary.errors),
+        )
         LOGGER.info("Finished scan. Results written to %s", run_dir)
         return summary
 
@@ -106,6 +131,7 @@ class RepositoryScanner:
         line_count = 0
         try:
             LOGGER.info("Scanning %s", source_file.relative_path)
+            await self._trace("file_started", label=source_file.relative_path, file_path=source_file.relative_path)
             errors: list[str] = []
 
             try:
@@ -114,6 +140,12 @@ class RepositoryScanner:
             except OSError as exc:
                 error = f"{source_file.relative_path}: failed to read file ({exc})"
                 LOGGER.error(error)
+                await self._trace(
+                    "file_failed",
+                    label=source_file.relative_path,
+                    file_path=source_file.relative_path,
+                    error=str(exc),
+                )
                 errors.append(error)
                 file_result = FileScanResult(
                     source_file=source_file,
@@ -133,6 +165,12 @@ class RepositoryScanner:
             except TokenizationError as exc:
                 error = f"{source_file.relative_path}: failed to size chunks with the configured tokenizer ({exc})"
                 LOGGER.error(error)
+                await self._trace(
+                    "file_chunking_failed",
+                    label=source_file.relative_path,
+                    file_path=source_file.relative_path,
+                    error=str(exc),
+                )
                 errors.append(error)
                 file_result = FileScanResult(
                     source_file=source_file,
@@ -145,6 +183,13 @@ class RepositoryScanner:
                 file_result.raw_artifact_path = write_file_artifact(run_dir, file_result)
                 file_result.report_path = write_file_report(run_dir, file_result)
                 return file_result
+            await self._trace(
+                "file_chunked",
+                label=source_file.relative_path,
+                file_path=source_file.relative_path,
+                total_chunks=len(chunks),
+                line_count=line_count,
+            )
             chunk_tasks = [
                 asyncio.create_task(self._scan_chunk(client, source_file, chunk))
                 for chunk in chunks
@@ -169,10 +214,23 @@ class RepositoryScanner:
             )
             file_result.raw_artifact_path = write_file_artifact(run_dir, file_result)
             file_result.report_path = write_file_report(run_dir, file_result)
+            await self._trace(
+                "file_completed",
+                label=source_file.relative_path,
+                file_path=source_file.relative_path,
+                finding_count=len(deduped_findings),
+                error_count=len(errors),
+            )
             return file_result
         except Exception as exc:
             error = f"{source_file.relative_path}: unexpected scan failure ({exc})"
             LOGGER.exception(error)
+            await self._trace(
+                "file_failed",
+                label=source_file.relative_path,
+                file_path=source_file.relative_path,
+                error=str(exc),
+            )
             file_result = FileScanResult(
                 source_file=source_file,
                 report_path=None,
@@ -194,13 +252,58 @@ class RepositoryScanner:
         chunk,
     ) -> ChunkScanResult:
         messages = build_messages(source_file, chunk, self._config.scan_mode)
+        trace_label = f"{source_file.relative_path} chunk {chunk.chunk_index}/{chunk.total_chunks}"
+        await self._trace(
+            "chunk_queued",
+            label=trace_label,
+            file_path=source_file.relative_path,
+            chunk_index=chunk.chunk_index,
+            total_chunks=chunk.total_chunks,
+            line_start=chunk.start_line,
+            line_end=chunk.end_line,
+            estimated_tokens=chunk.estimated_tokens,
+        )
         async with self._semaphore:
+            slot_id = await self._acquire_trace_slot(trace_label)
             try:
+                await self._trace(
+                    "chunk_request_started",
+                    label=trace_label,
+                    slot_id=slot_id,
+                    file_path=source_file.relative_path,
+                    chunk_index=chunk.chunk_index,
+                    total_chunks=chunk.total_chunks,
+                )
                 response_text, raw_payload, trace_data = await client.analyze_messages(
                     messages,
+                    trace_label=trace_label,
+                    slot_id=slot_id,
                 )
+                if trace_data is not None:
+                    append_trace_step(
+                        trace_data,
+                        "parse_started",
+                        chunk_index=chunk.chunk_index,
+                        total_chunks=chunk.total_chunks,
+                    )
                 parsed = parse_findings(response_text)
                 findings = normalize_findings(source_file, chunk, parsed)
+                if trace_data is not None:
+                    append_trace_step(
+                        trace_data,
+                        "parse_succeeded",
+                        finding_count=len(findings),
+                    )
+                await self._trace(
+                    "chunk_request_completed",
+                    label=trace_label,
+                    slot_id=slot_id,
+                    file_path=source_file.relative_path,
+                    chunk_index=chunk.chunk_index,
+                    total_chunks=chunk.total_chunks,
+                    finding_count=len(findings),
+                    duration_ms=(trace_data.duration_ms if trace_data is not None else None),
+                )
                 return ChunkScanResult(
                     chunk=chunk,
                     findings=findings,
@@ -214,12 +317,27 @@ class RepositoryScanner:
                     f"{source_file.relative_path} chunk {chunk.chunk_index}/{chunk.total_chunks}: {exc}"
                 )
                 LOGGER.warning(error)
+                failed_trace = (
+                    exc.trace_data
+                    if isinstance(exc, ModelClientError) and exc.trace_data is not None
+                    else _build_failed_trace(messages, self._config, trace_label=trace_label, slot_id=slot_id)
+                )
+                append_trace_step(failed_trace, "chunk_failed", error=str(exc))
+                await self._trace(
+                    "chunk_request_failed",
+                    label=trace_label,
+                    slot_id=slot_id,
+                    file_path=source_file.relative_path,
+                    chunk_index=chunk.chunk_index,
+                    total_chunks=chunk.total_chunks,
+                    error=str(exc),
+                )
                 return ChunkScanResult(
                     chunk=chunk,
                     findings=[],
                     raw_response_text=(response_text if "response_text" in locals() else None),
                     raw_payload=None,
-                    trace=_build_failed_trace(messages, self._config),
+                    trace=failed_trace,
                     error=error,
                 )
             except Exception as exc:
@@ -228,14 +346,27 @@ class RepositoryScanner:
                     f"unexpected failure ({exc})"
                 )
                 LOGGER.exception(error)
+                failed_trace = _build_failed_trace(messages, self._config, trace_label=trace_label, slot_id=slot_id)
+                append_trace_step(failed_trace, "chunk_failed", error=str(exc))
+                await self._trace(
+                    "chunk_request_failed",
+                    label=trace_label,
+                    slot_id=slot_id,
+                    file_path=source_file.relative_path,
+                    chunk_index=chunk.chunk_index,
+                    total_chunks=chunk.total_chunks,
+                    error=str(exc),
+                )
                 return ChunkScanResult(
                     chunk=chunk,
                     findings=[],
                     raw_response_text=None,
                     raw_payload=None,
-                    trace=_build_failed_trace(messages, self._config),
+                    trace=failed_trace,
                     error=error,
                 )
+            finally:
+                await self._release_trace_slot(slot_id, trace_label)
 
     async def _log_file_progress(self, relative_path: str, line_count: int) -> None:
         if self._total_files <= 0:
@@ -301,6 +432,7 @@ class RepositoryScanner:
             top_files=top_files,
             errors=errors,
             research_enabled=self._config.research_enabled,
+            trace_enabled=self._config.trace_enabled,
             research_tool_calls=(len(research_summary.tool_calls) if research_summary is not None else 0),
             research_search_queries=(len(research_summary.search_queries) if research_summary is not None else 0),
             research_references_collected=(
@@ -340,10 +472,35 @@ class RepositoryScanner:
         )
         return limited_source_files, limited_skips
 
+    async def _trace(self, event: str, **details) -> None:
+        if self._trace_recorder is None:
+            return
+        await self._trace_recorder.record(event, **details)
 
-def _build_failed_trace(messages: list[dict[str, str]], config: AppConfig) -> ChunkTraceData | None:
+    async def _acquire_trace_slot(self, label: str) -> int | None:
+        if self._trace_recorder is None:
+            return None
+        return await self._trace_recorder.acquire_slot(label)
+
+    async def _release_trace_slot(self, slot_id: int | None, label: str) -> None:
+        if self._trace_recorder is None:
+            return
+        await self._trace_recorder.release_slot(slot_id, label)
+
+
+def _build_failed_trace(
+    messages: list[dict[str, str]],
+    config: AppConfig,
+    *,
+    trace_label: str | None = None,
+    slot_id: int | None = None,
+) -> ChunkTraceData | None:
     if not config.trace_enabled:
         return None
     return ChunkTraceData(
         request_messages=[dict(message) for message in messages],
+        trace_label=trace_label,
+        slot_id=slot_id,
+        request_message_count=len(messages),
+        request_char_count=sum(len(str(message.get("content", ""))) for message in messages),
     )

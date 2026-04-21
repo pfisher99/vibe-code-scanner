@@ -170,6 +170,15 @@ class NormalizedFinding:
 @dataclass(slots=True)
 class ChunkTraceData:
     request_messages: list[dict[str, str]] | None
+    trace_label: str | None = None
+    slot_id: int | None = None
+    request_message_count: int = 0
+    request_char_count: int = 0
+    response_char_count: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: float | None = None
+    steps: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -243,6 +252,7 @@ class RunSummary:
     top_files: list[tuple[str, int]]
     errors: list[str]
     research_enabled: bool = False
+    trace_enabled: bool = False
     research_tool_calls: int = 0
     research_search_queries: int = 0
     research_references_collected: int = 0

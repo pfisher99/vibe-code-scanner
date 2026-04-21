@@ -123,6 +123,11 @@ class ScannerTests(unittest.TestCase):
                     {"id": "fake-response"},
                     ChunkTraceData(
                         request_messages=messages,
+                        trace_label="app.py chunk 1/1",
+                        slot_id=1,
+                        request_message_count=len(messages),
+                        request_char_count=sum(len(str(message.get("content", ""))) for message in messages),
+                        response_char_count=len('{"findings":[]}'),
                     ),
                 )
 
@@ -136,6 +141,13 @@ class ScannerTests(unittest.TestCase):
             chunk_text = chunk_artifact.read_text(encoding="utf-8")
             self.assertIn('"trace": {', chunk_text)
             self.assertIn('"request_messages"', chunk_text)
+            self.assertIn('"slot_id": 1', chunk_text)
+            self.assertIn('"steps"', chunk_text)
+            trace_events = (summary.run_dir / "raw" / "trace" / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"event": "chunk_request_started"', trace_events)
+            self.assertIn('"event": "chunk_request_completed"', trace_events)
+            index_text = (summary.run_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("Run event stream: [raw/trace/events.jsonl](raw/trace/events.jsonl)", index_text)
 
     def test_repository_scanner_keeps_chunk_requests_saturated_within_a_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

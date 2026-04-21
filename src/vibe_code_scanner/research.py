@@ -28,6 +28,7 @@ from .models import (
 )
 from .parser import ResponseParseError, load_json_object
 from .tokenization import build_token_counter
+from .tracing import TraceRecorder
 
 MAX_RESEARCH_STEPS = 8
 MAX_FILE_REPORT_CHARS = 12_000
@@ -57,6 +58,7 @@ class PostScanResearcher:
         client: OpenAICompatibleClient,
         file_results: list[FileScanResult],
         source_metadata: ScanSourceMetadata,
+        trace_recorder: TraceRecorder | None = None,
     ) -> ResearchSummary:
         if not any(result.findings for result in file_results):
             return ResearchSummary(
@@ -78,14 +80,24 @@ class PostScanResearcher:
 
         for step in range(1, MAX_RESEARCH_STEPS + 1):
             trace_label = f"research step {step}/{MAX_RESEARCH_STEPS}"
+            if trace_recorder is not None:
+                await trace_recorder.record("research_step_started", label=trace_label, step_index=step)
             try:
                 response_text, _raw_payload, _trace = await client.analyze_messages(
                     messages,
+                    trace_label=trace_label,
                     max_tokens_per_request=self._config.effective_research_max_tokens_per_request(),
                     thinking_token_budget=self._config.effective_research_thinking_token_budget(),
                 )
             except ModelClientError as exc:
                 errors.append(f"Research step {step} failed: {exc}")
+                if trace_recorder is not None:
+                    await trace_recorder.record(
+                        "research_step_failed",
+                        label=trace_label,
+                        step_index=step,
+                        error=str(exc),
+                    )
                 break
 
             try:
@@ -96,7 +108,21 @@ class PostScanResearcher:
                     f"{step} returned invalid JSON action: {exc}. "
                     f"Response excerpt: {_truncate(response_text, 320)}"
                 )
+                if trace_recorder is not None:
+                    await trace_recorder.record(
+                        "research_step_failed",
+                        label=trace_label,
+                        step_index=step,
+                        error=str(exc),
+                    )
                 break
+            if trace_recorder is not None:
+                await trace_recorder.record(
+                    "research_action_parsed",
+                    label=trace_label,
+                    step_index=step,
+                    action=action["action"],
+                )
 
             corrective_feedback = self._pre_action_feedback(
                 action,
@@ -108,6 +134,13 @@ class PostScanResearcher:
                 fetched_urls=fetched_urls,
             )
             if corrective_feedback is not None:
+                if trace_recorder is not None:
+                    await trace_recorder.record(
+                        "research_feedback_injected",
+                        label=trace_label,
+                        step_index=step,
+                        action=action["action"],
+                    )
                 messages.append({"role": "assistant", "content": response_text})
                 messages.append({"role": "user", "content": corrective_feedback})
                 continue
@@ -116,7 +149,21 @@ class PostScanResearcher:
                 report_markdown = str(action.get("report_markdown", "")).strip()
                 if not report_markdown:
                     errors.append("Research finish action did not include report_markdown.")
+                    if trace_recorder is not None:
+                        await trace_recorder.record(
+                            "research_step_failed",
+                            label=trace_label,
+                            step_index=step,
+                            error="finish action missing report_markdown",
+                        )
                     break
+                if trace_recorder is not None:
+                    await trace_recorder.record(
+                        "research_finished",
+                        label=trace_label,
+                        step_index=step,
+                        status="ok",
+                    )
                 return ResearchSummary(
                     report_markdown=report_markdown,
                     tool_calls=tool_calls,
@@ -130,6 +177,16 @@ class PostScanResearcher:
                 action,
                 file_results,
             )
+            if trace_recorder is not None:
+                await trace_recorder.record(
+                    "research_tool_executed",
+                    label=trace_label,
+                    step_index=step,
+                    action=action["action"],
+                    query=search_query,
+                    url=(tool_argument if action["action"] == "fetch_url" else None),
+                    status=("error" if "error" in tool_result else "ok"),
+                )
             if consulted_file is not None:
                 files_consulted.add(consulted_file)
             if search_query is not None:
@@ -165,6 +222,13 @@ class PostScanResearcher:
             )
 
         errors.append("Research loop ended before the model produced a final report.")
+        if trace_recorder is not None:
+            await trace_recorder.record(
+                "research_finished",
+                label="research",
+                status="incomplete",
+                error=errors[-1],
+            )
         return ResearchSummary(
             report_markdown=self._fallback_report(file_results, errors),
             tool_calls=tool_calls,

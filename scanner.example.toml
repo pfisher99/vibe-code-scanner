@@ -18,16 +18,16 @@ repetition_penalty = 1.0
 # Send a per-request reasoning budget to vLLM/Qwen-style endpoints.
 # Set this to false when using an external provider that does not support it.
 thinking_token_budget_enabled = true
-thinking_token_budget = 4096
+thinking_token_budget = 8192
 # Research mode gets a larger answer/thinking budget by default.
-research_max_tokens_per_request = 16384
-research_thinking_token_budget = 8192
+research_max_tokens_per_request = 32768
+research_thinking_token_budget = 16384
 
 max_concurrent_requests = 4
 # Keep Small for Qwen3.5 as it will think forever
-max_tokens_per_request = 8192
+max_tokens_per_request = 16384
 # Our local max is 64K per request, max 256K total across 4 workers
-chunk_target_tokens = 50000
+chunk_target_tokens = 32768
 chunk_overlap_tokens = 2000
 
 request_timeout_seconds = 300.0
@@ -54,7 +54,6 @@ include_globs = [
   "**/*.html",
   "**/*.java",
   "**/*.js",
-  "**/*.json",
   "**/*.jsx",
   "**/*.kt",
   "**/*.kts",
@@ -77,6 +76,13 @@ include_globs = [
   "**/*.yaml",
   "**/*.yml",
   "**/Dockerfile",
+  "**/package.json",
+  "**/appsettings.json",
+  "**/appsettings.*.json",
+  "**/manifest.json",
+  "**/*.policy.json",
+  "**/swagger.json",
+  "**/openapi.json",
   "**/requirements.txt",
   "**/requirements-*.txt",
 ]
@@ -116,4 +122,5 @@ ignored_directories = [
   "temp",
   "tmp",
   "venv",
+  "locale",
 ]

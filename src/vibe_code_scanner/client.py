@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 import urllib.error
 import urllib.request
 from typing import Any
 
 from .models import ApiStyle, AppConfig, ChunkTraceData
+from .tracing import append_trace_step
 
 
 class ModelClientError(RuntimeError):
     """Raised when the configured model endpoint cannot be used successfully."""
+
+    def __init__(self, message: str, *, trace_data: ChunkTraceData | None = None) -> None:
+        super().__init__(message)
+        self.trace_data = trace_data
 
 
 class OpenAICompatibleClient:
@@ -24,22 +30,48 @@ class OpenAICompatibleClient:
         self,
         messages: list[dict[str, str]],
         *,
+        trace_label: str | None = None,
+        slot_id: int | None = None,
         max_tokens_per_request: int | None = None,
         thinking_token_budget: int | None = None,
     ) -> tuple[str, dict[str, Any], ChunkTraceData | None]:
         last_error: Exception | None = None
         use_response_format = True
         attempt = 0
+        started_at = datetime.now(timezone.utc)
         trace_data = (
             ChunkTraceData(
                 request_messages=deepcopy(messages) if self._config.trace_enabled else None,
+                trace_label=trace_label,
+                slot_id=slot_id,
+                request_message_count=len(messages),
+                request_char_count=sum(len(str(message.get("content", ""))) for message in messages),
+                started_at=started_at.isoformat(),
             )
             if self._config.trace_enabled
             else None
         )
+        append_trace_step(
+            trace_data,
+            "request_prepared",
+            attempt=1,
+            api_style=self._config.api_style.value,
+            max_tokens_per_request=(max_tokens_per_request or self._config.max_tokens_per_request),
+            thinking_token_budget=(
+                thinking_token_budget
+                if thinking_token_budget is not None
+                else (self._config.thinking_token_budget if self._config.thinking_token_budget_enabled else None)
+            ),
+        )
 
         while attempt <= self._config.retry_count:
             try:
+                append_trace_step(
+                    trace_data,
+                    "request_attempt_started",
+                    attempt=attempt + 1,
+                    use_response_format=use_response_format,
+                )
                 payload = self._build_payload(
                     messages,
                     use_response_format=use_response_format,
@@ -48,18 +80,44 @@ class OpenAICompatibleClient:
                 )
                 response_json = await asyncio.to_thread(self._post_json, payload)
                 response_text = self._extract_response_text(response_json)
+                finished_at = datetime.now(timezone.utc)
+                if trace_data is not None:
+                    trace_data.response_char_count = len(response_text)
+                    trace_data.finished_at = finished_at.isoformat()
+                    trace_data.duration_ms = round((finished_at - started_at).total_seconds() * 1000, 2)
+                append_trace_step(
+                    trace_data,
+                    "response_received",
+                    attempt=attempt + 1,
+                    response_char_count=len(response_text),
+                )
                 return response_text, response_json, trace_data
             except _UnsupportedResponseFormat:
+                append_trace_step(
+                    trace_data,
+                    "response_format_fallback",
+                    attempt=attempt + 1,
+                )
                 use_response_format = False
                 continue
             except Exception as exc:
                 last_error = exc
+                append_trace_step(
+                    trace_data,
+                    "request_attempt_failed",
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
                 if attempt >= self._config.retry_count:
                     break
                 await asyncio.sleep(min(8.0, 0.75 * (2**attempt)))
                 attempt += 1
 
-        raise ModelClientError(str(last_error or "Model request failed."))
+        if trace_data is not None:
+            finished_at = datetime.now(timezone.utc)
+            trace_data.finished_at = finished_at.isoformat()
+            trace_data.duration_ms = round((finished_at - started_at).total_seconds() * 1000, 2)
+        raise ModelClientError(str(last_error or "Model request failed."), trace_data=trace_data)
 
     def _build_payload(
         self,

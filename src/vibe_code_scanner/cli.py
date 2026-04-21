@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--trace",
         action="store_true",
         default=None,
-        help="Persist per-chunk prompt metadata in raw artifacts.",
+        help="Enable slot-based trace logging and persist rich trace metadata in raw artifacts.",
     )
     parser.add_argument(
         "--research",
