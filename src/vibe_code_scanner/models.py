@@ -45,6 +45,11 @@ class ScanSourceKind(StrEnum):
     GITHUB_REPO = "github_repo"
 
 
+class SearchBackend(StrEnum):
+    NONE = "none"
+    SEARXNG = "searxng"
+
+
 @dataclass(slots=True)
 class AppConfig:
     root_path: Path
@@ -64,6 +69,12 @@ class AppConfig:
     exclude_globs: list[str] = field(default_factory=list)
     ignored_directories: list[str] = field(default_factory=list)
     api_key: str | None = None
+    trace_enabled: bool = False
+    trace_live_enabled: bool = False
+    research_enabled: bool = False
+    search_backend: SearchBackend = SearchBackend.NONE
+    search_base_url: str | None = None
+    research_max_results: int = 3
 
 
 @dataclass(slots=True)
@@ -131,11 +142,60 @@ class NormalizedFinding:
 
 
 @dataclass(slots=True)
+class ChunkTraceData:
+    request_messages: list[dict[str, str]] | None
+    used_streaming: bool
+    live_streaming_requested: bool
+    stream_fallback_reason: str | None = None
+
+
+@dataclass(slots=True)
+class ResearchReference:
+    title: str
+    url: str
+    snippet: str = ""
+
+
+@dataclass(slots=True)
+class DependencyVulnerability:
+    id: str
+    summary: str
+    aliases: list[str] = field(default_factory=list)
+    severity: str | None = None
+    references: list[ResearchReference] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DependencyResearchItem:
+    source_file: str
+    ecosystem: str
+    name: str
+    version_spec: str | None
+    resolved_version: str | None
+    latest_version: str | None
+    vulnerabilities: list[DependencyVulnerability] = field(default_factory=list)
+    search_results: list[ResearchReference] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ResearchSummary:
+    dependencies: list[DependencyResearchItem] = field(default_factory=list)
+    total_dependencies: int = 0
+    vulnerable_dependencies: int = 0
+    searched_dependencies: int = 0
+    errors: list[str] = field(default_factory=list)
+    report_path: Path | None = None
+    raw_artifact_path: Path | None = None
+
+
+@dataclass(slots=True)
 class ChunkScanResult:
     chunk: CodeChunk
     findings: list[NormalizedFinding]
     raw_response_text: str | None
     raw_payload: dict | None
+    trace: ChunkTraceData | None = None
     error: str | None = None
 
 
@@ -171,3 +231,7 @@ class RunSummary:
     findings_by_severity: dict[str, int]
     top_files: list[tuple[str, int]]
     errors: list[str]
+    research_enabled: bool = False
+    total_dependencies_researched: int = 0
+    vulnerable_dependencies: int = 0
+    searched_dependencies: int = 0

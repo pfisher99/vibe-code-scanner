@@ -2,19 +2,26 @@ root_path = "."
 export_dir = "scan-runs"
 
 base_url = "http://127.0.0.1:8000"
-model_name = "Qwen/Qwen2.5-Coder-14B-Instruct"
+model_name = "Qwen3.5-9B-local"
 api_style = "chat_completions"
 
 scan_mode = "security_and_quality"
 
 max_concurrent_requests = 4
-max_tokens_per_request = 1200
-chunk_target_tokens = 1400
-chunk_overlap_tokens = 160
+# Sample budget for a 64k per-request context window:
+# about 44k chunk input + up to 16k output + prompt/metadata headroom.
+max_tokens_per_request = 16000
+chunk_target_tokens = 44000
+chunk_overlap_tokens = 2000
 
-request_timeout_seconds = 60.0
+request_timeout_seconds = 300.0
 retry_count = 2
 max_file_size_bytes = 1048576
+
+research = false
+search_backend = "none"
+search_base_url = ""
+research_max_results = 3
 
 include_globs = [
   "**/*.c",
@@ -51,6 +58,8 @@ include_globs = [
   "**/*.yaml",
   "**/*.yml",
   "**/Dockerfile",
+  "**/requirements.txt",
+  "**/requirements-*.txt",
 ]
 
 exclude_globs = [

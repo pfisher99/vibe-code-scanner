@@ -26,6 +26,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", help="OpenAI-compatible endpoint root override.")
     parser.add_argument("--model", help="Model name override.")
     parser.add_argument(
+        "--trace",
+        action="store_true",
+        default=None,
+        help="Persist per-chunk prompt and streaming metadata in raw artifacts.",
+    )
+    parser.add_argument(
+        "--trace-live",
+        action="store_true",
+        default=None,
+        help="Stream raw model output live while chunks are being analyzed.",
+    )
+    parser.add_argument(
+        "--research",
+        action="store_true",
+        default=None,
+        help="Enrich the scan with dependency version and vulnerability research.",
+    )
+    parser.add_argument(
+        "--search-backend",
+        choices=["none", "searxng"],
+        help="Optional search backend used during research enrichment.",
+    )
+    parser.add_argument(
+        "--search-base-url",
+        help="Base URL for the configured search backend, for example http://127.0.0.1:8080.",
+    )
+    parser.add_argument(
         "--scan-mode",
         choices=["security", "security_and_quality"],
         help="Scan mode override.",
@@ -70,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
                 "export_dir": str(Path(args.output).expanduser().resolve()) if args.output else None,
                 "base_url": args.base_url,
                 "model_name": args.model,
+                "trace": args.trace,
+                "trace_live": args.trace_live,
+                "research": args.research,
+                "search_backend": args.search_backend,
+                "search_base_url": args.search_base_url,
                 "scan_mode": args.scan_mode,
                 "api_style": args.api_style,
                 "max_concurrent_requests": args.max_concurrency,

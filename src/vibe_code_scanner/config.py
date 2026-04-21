@@ -19,10 +19,11 @@ from .defaults import (
     DEFAULT_MAX_CONCURRENT_REQUESTS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
     DEFAULT_MAX_TOKENS_PER_REQUEST,
+    DEFAULT_RESEARCH_MAX_RESULTS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_RETRY_COUNT,
 )
-from .models import ApiStyle, AppConfig, ScanMode
+from .models import ApiStyle, AppConfig, ScanMode, SearchBackend
 
 
 class ConfigError(ValueError):
@@ -96,6 +97,15 @@ def build_config(raw: Mapping[str, Any]) -> AppConfig:
         exclude_globs=exclude_globs,
         ignored_directories=ignored_directories,
         api_key=api_key,
+        trace_enabled=_parse_bool(_get(raw, "trace", False), "trace"),
+        trace_live_enabled=_parse_bool(_get(raw, "trace_live", False), "trace_live"),
+        research_enabled=_parse_bool(_get(raw, "research", False), "research"),
+        search_backend=_parse_search_backend(_get(raw, "search_backend", SearchBackend.NONE.value)),
+        search_base_url=_parse_optional_str(_get(raw, "search_base_url", None)),
+        research_max_results=_positive_int(
+            _get(raw, "research_max_results", DEFAULT_RESEARCH_MAX_RESULTS),
+            "research_max_results",
+        ),
     )
     _validate_config(config)
     return config
@@ -155,6 +165,24 @@ def _positive_float(value: Any, field_name: str) -> float:
     return parsed
 
 
+def _parse_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ConfigError(f"{field_name} must be a boolean.")
+
+
+def _parse_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
 def _parse_scan_mode(value: Any) -> ScanMode:
     normalized = str(value).strip().lower()
     aliases = {
@@ -179,6 +207,15 @@ def _parse_api_style(value: Any) -> ApiStyle:
         raise ConfigError(f"api_style must be one of: {options}") from exc
 
 
+def _parse_search_backend(value: Any) -> SearchBackend:
+    normalized = str(value).strip().lower()
+    try:
+        return SearchBackend(normalized)
+    except ValueError as exc:
+        options = ", ".join(backend.value for backend in SearchBackend)
+        raise ConfigError(f"search_backend must be one of: {options}") from exc
+
+
 def _validate_config(config: AppConfig) -> None:
     if not config.root_path.exists():
         raise ConfigError(f"Scan root does not exist: {config.root_path}")
@@ -192,6 +229,8 @@ def _validate_config(config: AppConfig) -> None:
         raise ConfigError("chunk_overlap_tokens must be smaller than chunk_target_tokens.")
     if not config.include_globs:
         raise ConfigError("include_globs must contain at least one pattern.")
+    if config.search_backend != SearchBackend.NONE and not config.search_base_url:
+        raise ConfigError("search_base_url is required when search_backend is enabled.")
 
 
 def _resolve_path(value: Any, base_dir: Path) -> Path:
