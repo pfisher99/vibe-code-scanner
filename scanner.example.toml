@@ -23,6 +23,15 @@ thinking_token_budget = 8192
 research_max_tokens_per_request = 32768
 research_thinking_token_budget = 16384
 
+# Optional alternate max-context profile, activated with `--max-context`.
+# This profile disables thinking-budget hints and uses the remaining input
+# window for chunk sizing: 262,144 total - 81,920 output = 180,224 chunk target.
+max_context_max_tokens_per_request = 81920
+max_context_total_context_window_tokens = 262144
+# Optional override for research requests while `--max-context` is enabled.
+# If omitted, research uses the same 81,920 output-token budget.
+max_context_research_max_tokens_per_request = 81920
+
 max_concurrent_requests = 4
 # Keep Small for Qwen3.5 as it will think forever
 max_tokens_per_request = 16384

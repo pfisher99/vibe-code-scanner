@@ -1,6 +1,6 @@
 import unittest
 
-from vibe_code_scanner.cli import main
+from vibe_code_scanner.cli import build_parser, main
 
 
 class CliTests(unittest.TestCase):
@@ -13,6 +13,10 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as context:
             main(["--ref", "main"])
         self.assertEqual(context.exception.code, 2)
+
+    def test_parser_accepts_max_context_flag(self) -> None:
+        args = build_parser().parse_args(["--max-context"])
+        self.assertTrue(args.max_context)
 
 
 if __name__ == "__main__":

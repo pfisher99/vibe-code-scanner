@@ -26,6 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", help="OpenAI-compatible endpoint root override.")
     parser.add_argument("--model", help="Model name override.")
     parser.add_argument(
+        "--max-context",
+        action="store_true",
+        default=None,
+        help="Use the alternate max-context token profile from config for scan and research requests.",
+    )
+    parser.add_argument(
         "--trace",
         action="store_true",
         default=None,
@@ -96,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 "export_dir": str(Path(args.output).expanduser().resolve()) if args.output else None,
                 "base_url": args.base_url,
                 "model_name": args.model,
+                "max_context": args.max_context,
                 "trace": args.trace,
                 "research": args.research,
                 "search_backend": args.search_backend,

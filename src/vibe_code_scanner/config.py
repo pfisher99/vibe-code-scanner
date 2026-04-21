@@ -17,6 +17,8 @@ from .defaults import (
     DEFAULT_IGNORED_DIRECTORIES,
     DEFAULT_INCLUDE_GLOBS,
     DEFAULT_MAX_CONCURRENT_REQUESTS,
+    DEFAULT_MAX_CONTEXT_MAX_TOKENS_PER_REQUEST,
+    DEFAULT_MAX_CONTEXT_TOTAL_CONTEXT_WINDOW_TOKENS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
     DEFAULT_MAX_TOKENS_PER_REQUEST,
     DEFAULT_MIN_P,
@@ -56,19 +58,23 @@ def load_config_file(config_path: Path | None) -> dict[str, Any]:
 
 
 def build_config(raw: Mapping[str, Any]) -> AppConfig:
-    config_dir = Path(str(_get(raw, "__config_dir__", "."))).expanduser().resolve()
-    root_path = _resolve_path(_get(raw, "root_path", "."), config_dir)
-    export_dir = _resolve_path(_get(raw, "export_dir", DEFAULT_EXPORT_DIR), config_dir)
-    base_url = str(_get(raw, "base_url", DEFAULT_BASE_URL)).strip()
-    model_name = str(_get(raw, "model_name", "")).strip()
-    api_style = _parse_api_style(_get(raw, "api_style", DEFAULT_API_STYLE))
-    scan_mode = _parse_scan_mode(_get(raw, "scan_mode", ScanMode.SECURITY_AND_QUALITY.value))
-    include_globs = _coerce_str_list(_get(raw, "include_globs", DEFAULT_INCLUDE_GLOBS))
-    exclude_globs = _coerce_str_list(_get(raw, "exclude_globs", DEFAULT_EXCLUDE_GLOBS))
+    normalized_raw = dict(raw)
+    if _parse_bool(_get(normalized_raw, "max_context", False), "max_context"):
+        _apply_max_context_profile(normalized_raw)
+
+    config_dir = Path(str(_get(normalized_raw, "__config_dir__", "."))).expanduser().resolve()
+    root_path = _resolve_path(_get(normalized_raw, "root_path", "."), config_dir)
+    export_dir = _resolve_path(_get(normalized_raw, "export_dir", DEFAULT_EXPORT_DIR), config_dir)
+    base_url = str(_get(normalized_raw, "base_url", DEFAULT_BASE_URL)).strip()
+    model_name = str(_get(normalized_raw, "model_name", "")).strip()
+    api_style = _parse_api_style(_get(normalized_raw, "api_style", DEFAULT_API_STYLE))
+    scan_mode = _parse_scan_mode(_get(normalized_raw, "scan_mode", ScanMode.SECURITY_AND_QUALITY.value))
+    include_globs = _coerce_str_list(_get(normalized_raw, "include_globs", DEFAULT_INCLUDE_GLOBS))
+    exclude_globs = _coerce_str_list(_get(normalized_raw, "exclude_globs", DEFAULT_EXCLUDE_GLOBS))
     ignored_directories = _coerce_str_list(
-        _get(raw, "ignored_directories", DEFAULT_IGNORED_DIRECTORIES)
+        _get(normalized_raw, "ignored_directories", DEFAULT_IGNORED_DIRECTORIES)
     )
-    api_key = str(_get(raw, "api_key", os.environ.get("OPENAI_API_KEY", ""))).strip() or None
+    api_key = str(_get(normalized_raw, "api_key", os.environ.get("OPENAI_API_KEY", ""))).strip() or None
 
     config = AppConfig(
         root_path=root_path,
@@ -78,69 +84,69 @@ def build_config(raw: Mapping[str, Any]) -> AppConfig:
         api_style=api_style,
         scan_mode=scan_mode,
         max_concurrent_requests=_positive_int(
-            _get(raw, "max_concurrent_requests", DEFAULT_MAX_CONCURRENT_REQUESTS),
+            _get(normalized_raw, "max_concurrent_requests", DEFAULT_MAX_CONCURRENT_REQUESTS),
             "max_concurrent_requests",
         ),
         max_tokens_per_request=_positive_int(
-            _get(raw, "max_tokens_per_request", DEFAULT_MAX_TOKENS_PER_REQUEST),
+            _get(normalized_raw, "max_tokens_per_request", DEFAULT_MAX_TOKENS_PER_REQUEST),
             "max_tokens_per_request",
         ),
         chunk_target_tokens=_positive_int(
-            _get(raw, "chunk_target_tokens", DEFAULT_CHUNK_TARGET_TOKENS),
+            _get(normalized_raw, "chunk_target_tokens", DEFAULT_CHUNK_TARGET_TOKENS),
             "chunk_target_tokens",
         ),
         chunk_overlap_tokens=_non_negative_int(
-            _get(raw, "chunk_overlap_tokens", DEFAULT_CHUNK_OVERLAP_TOKENS),
+            _get(normalized_raw, "chunk_overlap_tokens", DEFAULT_CHUNK_OVERLAP_TOKENS),
             "chunk_overlap_tokens",
         ),
         request_timeout_seconds=_positive_float(
-            _get(raw, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS),
+            _get(normalized_raw, "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS),
             "request_timeout_seconds",
         ),
-        retry_count=_non_negative_int(_get(raw, "retry_count", DEFAULT_RETRY_COUNT), "retry_count"),
+        retry_count=_non_negative_int(_get(normalized_raw, "retry_count", DEFAULT_RETRY_COUNT), "retry_count"),
         max_file_size_bytes=_positive_int(
-            _get(raw, "max_file_size_bytes", DEFAULT_MAX_FILE_SIZE_BYTES),
+            _get(normalized_raw, "max_file_size_bytes", DEFAULT_MAX_FILE_SIZE_BYTES),
             "max_file_size_bytes",
         ),
         include_globs=include_globs,
         exclude_globs=exclude_globs,
         ignored_directories=ignored_directories,
         api_key=api_key,
-        trace_enabled=_parse_bool(_get(raw, "trace", False), "trace"),
-        research_enabled=_parse_bool(_get(raw, "research", False), "research"),
-        search_backend=_parse_search_backend(_get(raw, "search_backend", SearchBackend.NONE.value)),
-        search_base_url=_parse_optional_str(_get(raw, "search_base_url", None)),
+        trace_enabled=_parse_bool(_get(normalized_raw, "trace", False), "trace"),
+        research_enabled=_parse_bool(_get(normalized_raw, "research", False), "research"),
+        search_backend=_parse_search_backend(_get(normalized_raw, "search_backend", SearchBackend.NONE.value)),
+        search_base_url=_parse_optional_str(_get(normalized_raw, "search_base_url", None)),
         research_max_results=_positive_int(
-            _get(raw, "research_max_results", DEFAULT_RESEARCH_MAX_RESULTS),
+            _get(normalized_raw, "research_max_results", DEFAULT_RESEARCH_MAX_RESULTS),
             "research_max_results",
         ),
-        tokenizer_mode=_parse_tokenizer_mode(_get(raw, "tokenizer_mode", DEFAULT_TOKENIZER_MODE)),
-        temperature=_non_negative_float(_get(raw, "temperature", DEFAULT_TEMPERATURE), "temperature"),
-        top_p=_probability_float(_get(raw, "top_p", DEFAULT_TOP_P), "top_p"),
-        top_k=_non_negative_int(_get(raw, "top_k", DEFAULT_TOP_K), "top_k"),
-        min_p=_probability_float(_get(raw, "min_p", DEFAULT_MIN_P), "min_p"),
-        presence_penalty=_float_value(_get(raw, "presence_penalty", DEFAULT_PRESENCE_PENALTY), "presence_penalty"),
+        tokenizer_mode=_parse_tokenizer_mode(_get(normalized_raw, "tokenizer_mode", DEFAULT_TOKENIZER_MODE)),
+        temperature=_non_negative_float(_get(normalized_raw, "temperature", DEFAULT_TEMPERATURE), "temperature"),
+        top_p=_probability_float(_get(normalized_raw, "top_p", DEFAULT_TOP_P), "top_p"),
+        top_k=_non_negative_int(_get(normalized_raw, "top_k", DEFAULT_TOP_K), "top_k"),
+        min_p=_probability_float(_get(normalized_raw, "min_p", DEFAULT_MIN_P), "min_p"),
+        presence_penalty=_float_value(_get(normalized_raw, "presence_penalty", DEFAULT_PRESENCE_PENALTY), "presence_penalty"),
         repetition_penalty=_positive_float(
-            _get(raw, "repetition_penalty", DEFAULT_REPETITION_PENALTY),
+            _get(normalized_raw, "repetition_penalty", DEFAULT_REPETITION_PENALTY),
             "repetition_penalty",
         ),
         thinking_token_budget_enabled=_parse_bool(
-            _get(raw, "thinking_token_budget_enabled", DEFAULT_THINKING_TOKEN_BUDGET_ENABLED),
+            _get(normalized_raw, "thinking_token_budget_enabled", DEFAULT_THINKING_TOKEN_BUDGET_ENABLED),
             "thinking_token_budget_enabled",
         ),
         thinking_token_budget=_positive_int(
-            _get(raw, "thinking_token_budget", DEFAULT_THINKING_TOKEN_BUDGET),
+            _get(normalized_raw, "thinking_token_budget", DEFAULT_THINKING_TOKEN_BUDGET),
             "thinking_token_budget",
         ),
         research_max_tokens_per_request=_optional_positive_int(
-            _get(raw, "research_max_tokens_per_request", None),
+            _get(normalized_raw, "research_max_tokens_per_request", None),
             "research_max_tokens_per_request",
         ),
         research_thinking_token_budget=_optional_positive_int(
-            _get(raw, "research_thinking_token_budget", None),
+            _get(normalized_raw, "research_thinking_token_budget", None),
             "research_thinking_token_budget",
         ),
-        max_files=_optional_positive_int(_get(raw, "max_files", None), "max_files"),
+        max_files=_optional_positive_int(_get(normalized_raw, "max_files", None), "max_files"),
     )
     _validate_config(config)
     return config
@@ -154,6 +160,34 @@ def load_app_config(config_path: Path | None, overrides: Mapping[str, Any] | Non
             if value is not None:
                 merged[key] = value
     return build_config(merged)
+
+
+def _apply_max_context_profile(raw: dict[str, Any]) -> None:
+    max_output_tokens = _positive_int(
+        _get(raw, "max_context_max_tokens_per_request", DEFAULT_MAX_CONTEXT_MAX_TOKENS_PER_REQUEST),
+        "max_context_max_tokens_per_request",
+    )
+    total_context_window_tokens = _positive_int(
+        _get(
+            raw,
+            "max_context_total_context_window_tokens",
+            DEFAULT_MAX_CONTEXT_TOTAL_CONTEXT_WINDOW_TOKENS,
+        ),
+        "max_context_total_context_window_tokens",
+    )
+    if max_output_tokens >= total_context_window_tokens:
+        raise ConfigError(
+            "max_context_max_tokens_per_request must be smaller than max_context_total_context_window_tokens."
+        )
+
+    raw["max_tokens_per_request"] = max_output_tokens
+    raw["chunk_target_tokens"] = total_context_window_tokens - max_output_tokens
+    raw["thinking_token_budget_enabled"] = False
+    raw["research_max_tokens_per_request"] = _optional_positive_int(
+        _get(raw, "max_context_research_max_tokens_per_request", max_output_tokens),
+        "max_context_research_max_tokens_per_request",
+    )
+    raw["research_thinking_token_budget"] = None
 
 
 def _get(mapping: Mapping[str, Any], key: str, default: Any) -> Any:

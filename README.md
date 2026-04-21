@@ -1,24 +1,27 @@
 # Vibe Code Scanner
 
-`vibe-code-scanner` is a local AI-assisted CLI for scanning a source tree with an OpenAI-compatible model endpoint such as vLLM. It walks a repository, skips generated and binary content, chunks source files by a token budget, asks the model for strict JSON findings per chunk, deduplicates overlaps, and renders markdown plus machine-readable artifacts for each run.
+This is a local AI code scanner for messing around with source trees using a local OpenAI-compatible model endpoint like vLLM.
 
-This project is built to run locally against a model that fits on a 16GB GPU, rather than depending on a hosted scanning service.
+Also, to be extremely clear: this is AI slop generated for fun. It is not pretending to be some polished enterprise security product. That said, it does actually work, and it is pretty decent for poking through a repo, chunking files, asking a local model for structured findings, and dumping the results into reports you can read later.
 
-TOML is used for configuration because Python 3.11 ships `tomllib` in the standard library, so the scanner can stay dependency-light while still having a real config format.
+The whole thing is aimed at local use on a machine with a roughly 16GB GPU and a small-ish model, not a hosted SaaS setup.
 
-## Features
+TOML is used for config because Python 3.11 already ships `tomllib`, which keeps the project dependency-light and easy to tweak.
 
-- Recursive source-tree discovery with sensible default ignore directories
-- Include and exclude glob controls
-- Binary and large-file skipping
-- Token-based chunking with configurable overlap, using the model tokenizer when available
-- OpenAI-compatible chat or responses style API client
-- Conservative JSON-only review prompt with explicit `no findings` behavior
-- Per-chunk raw artifacts, per-file markdown reports, top-level summary markdown, and `findings.json`
-- Retry and timeout handling with partial-run completion
-- Local path scans or public GitHub repo scans via `git clone`
-- Optional slot-based trace logging plus per-chunk and run-level trace artifacts for local debugging
-- Optional final research pass where the model inspects the completed scan outputs and can use web lookup tools when configured
+## What It Does
+
+- Walks a repo recursively
+- Skips common junk like `.git`, `node_modules`, `dist`, `build`, `bin`, `obj`, `.venv`, `__pycache__`, and similar folders
+- Skips binary files and oversized files
+- Chunks source files by token budget
+- Supports chunk overlap
+- Sends each chunk to a local model
+- Expects strict JSON back
+- Deduplicates overlapping findings
+- Writes markdown reports plus machine-readable JSON
+- Can clone and scan a public GitHub repo directly
+- Has a post-scan research pass if you want the model to go back over its own output
+- Has trace/debug output so you can actually see what the scanner is doing
 
 ## Install
 
@@ -28,86 +31,102 @@ python -m pip install -e .
 
 ## Quick Start
 
-1. Start a local OpenAI-compatible endpoint, for example vLLM, on `http://127.0.0.1:8000`.
+1. Start your local model server on `http://127.0.0.1:8000`.
 2. Copy or edit [`scanner.example.toml`](scanner.example.toml).
-3. Run the scanner against a local repository root:
+3. Run the scanner.
+
+Scan a local repo:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml
 ```
 
-To scan a public GitHub repository directly from the CLI:
+Scan a public GitHub repo:
 
 ```bash
 vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --ref master --config scanner.example.toml --scan-mode security --max-concurrency 4
 ```
 
-To keep slot-based trace logging and rich raw trace artifacts:
+Turn on trace/debug output:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --trace
 ```
 
-To run the final post-scan research pass:
+Run the post-scan research pass:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --research
 ```
 
-To add optional web search tools to the final research pass through a SearXNG instance:
-
-```bash
-vibe-code-scanner ../some-repo --config scanner.example.toml --research --search-backend searxng --search-base-url http://127.0.0.1:8080
-```
-
-To use the built-in no-extra-dependency web search path:
+Use the built-in web search path during research:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --research --search-backend duckduckgo
 ```
 
-You can also override common settings directly for a local path:
-
-```bash
-vibe-code-scanner ../some-repo --model Qwen3.5-9B-local --base-url http://127.0.0.1:8000 --output scan-runs
-```
-
-For quick testing against only a random subset of eligible files:
+Run only a random subset of files for a quick test:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --max-files 10
 ```
 
-## Config Example
+Use the alternate big-window profile from config:
+
+```bash
+vibe-code-scanner ../some-repo --config scanner.example.toml --max-context
+```
+
+## The Current Vibe
+
+The sample config is tuned around a local `Qwen3.5-9B-local` style setup.
+
+Normal mode in the sample config is basically:
+
+- `max_tokens_per_request = 16384`
+- `chunk_target_tokens = 32768`
+- `thinking_token_budget = 8192`
+- `max_concurrent_requests = 4`
+
+There is also an optional `--max-context` mode now. That pulls a separate token profile from config and rewrites the runtime settings.
+
+In the sample config that means:
+
+- total context window: `262144`
+- output tokens: `81920`
+- input chunk target: `180224`
+- thinking budget: disabled
+
+So yes, the scanner does the math for you instead of making you fiddle with it every run.
+
+## Important Config Knobs
 
 See [`scanner.example.toml`](scanner.example.toml).
 
-Important settings:
+The ones that matter most:
 
-- `base_url`: OpenAI-compatible endpoint root. Defaults to `http://127.0.0.1:8000`.
-- `model_name`: Model identifier sent to the endpoint.
-- `tokenizer_mode`: `auto`, `vllm`, or `heuristic`. The sample config uses `vllm` so chunk sizing matches the local model tokenizer.
-- `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `repetition_penalty`: generation settings exposed in config. The defaults are tuned for local Qwen3.5 thinking-mode coding scans.
-- `thinking_token_budget_enabled`: When `true`, the scanner sends a non-standard `extra_body.thinking_token_budget` field for reasoning-capable local endpoints such as vLLM with Qwen-style thinking support. Set it to `false` when using an external provider that does not support this field.
-- `thinking_token_budget`: Maximum reasoning-budget tokens to ask the model to spend before switching to the final answer. The sample config defaults to `4096`.
-- `research_max_tokens_per_request`: Optional research-only output limit. If omitted, research defaults to `2x` the normal `max_tokens_per_request`.
-- `research_thinking_token_budget`: Optional research-only reasoning budget. If omitted, research defaults to `2x` the normal `thinking_token_budget`.
-- `scan_mode`: `security` or `security_and_quality`.
-- `chunk_target_tokens`: Approximate input chunk size.
-- `chunk_overlap_tokens`: Approximate overlap between adjacent chunks.
-- `max_tokens_per_request`: Maximum model output tokens.
-- `request_timeout_seconds`: Per-request timeout. The sample config uses `300` seconds to leave room for long local generations.
-- The sample config is tuned for a roughly `64k` per-request window: `50k` chunk target + up to `4k` output + prompt headroom.
-- The sample model and token budget are intended for a local setup with a 16GB GPU.
-- `research`: Enables a final LLM-guided research pass over the completed scan outputs.
-- `max_files`: Optional testing limit. When set, the scanner samples a random subset of up to this many eligible files before scanning.
-- `search_backend`: Optional search backend available to the final research pass. `duckduckgo` works without any extra local service. `searxng` is still available if you want to point at your own instance.
-- `search_base_url`: Base URL for the configured search backend. This is only required for `searxng`.
-- `research_max_results`: Maximum search results to return per research lookup.
+- `base_url`: where your local OpenAI-compatible endpoint lives
+- `model_name`: model id sent to the endpoint
+- `tokenizer_mode`: `vllm`, `auto`, or `heuristic`
+- `scan_mode`: `security` or `security_and_quality`
+- `max_concurrent_requests`: how many requests stay in flight
+- `max_tokens_per_request`: output token cap for normal scan mode
+- `chunk_target_tokens`: input chunk size target
+- `chunk_overlap_tokens`: overlap between adjacent chunks
+- `thinking_token_budget_enabled`: whether to send `extra_body.thinking_token_budget`
+- `thinking_token_budget`: normal scan reasoning budget
+- `research`: whether to run the final research pass
+- `research_max_tokens_per_request`: research-only output cap
+- `research_thinking_token_budget`: research-only reasoning budget
+- `max_context_max_tokens_per_request`: alternate output budget used by `--max-context`
+- `max_context_total_context_window_tokens`: alternate total window used by `--max-context`
+- `max_context_research_max_tokens_per_request`: optional research output cap when `--max-context` is on
+- `max_files`: random testing limit
+- `request_timeout_seconds`: per-request timeout
 
-## Output Layout
+## Output
 
-Each run creates a timestamped folder under `export_dir`:
+Each run gets its own timestamped folder under `export_dir`.
 
 ```text
 scan-runs/
@@ -132,13 +151,59 @@ scan-runs/
         final-report.json
 ```
 
-## CLI Usage
+The useful bits are:
+
+- `index.md`: run summary
+- `findings.json`: full machine-readable output
+- `files/**/*.md`: per-file markdown reports
+- `raw/chunks/*.json`: raw per-chunk results
+- `raw/trace/events.jsonl`: trace/debug stream for the run
+- `research/final-report.md`: final research report, if enabled
+
+## Trace Mode
+
+`--trace` is the general debug mode now.
+
+It does three things:
+
+- prints step-by-step trace lines in the terminal
+- tracks which concurrent request slot is doing what
+- stores richer trace metadata in chunk artifacts and `raw/trace/events.jsonl`
+
+So if a run feels stuck, weird, or noisy, this is the mode you want.
+
+## Research Mode
+
+The first scan pass is from-memory only. No tools.
+
+If you enable `--research`, the scanner then does a second pass where the model can inspect:
+
+- the aggregated findings
+- per-file reports
+- optional web search results
+- fetched reference pages
+
+Right now the built-in no-extra-dependency search path is `duckduckgo`. `searxng` is still supported if you want to point at your own instance.
+
+Research is useful, but it is still very much “AI doing AI things,” so treat it like a second-pass assistant, not ground truth.
+
+## A Few Honest Notes
+
+- This is for fun. It is not a substitute for a real security review.
+- Small local models will still hallucinate, drift, or output garbage sometimes.
+- The scanner tries hard to force strict JSON and recover from messy outputs, but the model can still be annoying.
+- `thinking_token_budget` is not standard OpenAI API behavior. It only works when the endpoint supports it.
+- `--repo` is public GitHub only right now and depends on `git` being installed.
+- The built-in web search path is intentionally simple.
+- Broad file scanning is a tradeoff. The sample config is tuned to avoid a bunch of low-value junk.
+
+## CLI
 
 ```text
 usage: vibe-code-scanner [-h] [--config CONFIG] [--output OUTPUT]
                          [--repo REPO] [--ref REF]
                          [--base-url BASE_URL] [--model MODEL]
-                         [--trace]
+                         [--max-context] [--trace]
                          [--research] [--search-backend {none,searxng,duckduckgo}]
                          [--search-base-url SEARCH_BASE_URL]
                          [--scan-mode {security,security_and_quality}]
@@ -149,21 +214,14 @@ usage: vibe-code-scanner [-h] [--config CONFIG] [--output OUTPUT]
                          [root]
 ```
 
-## Notes
+## Prompt Files
 
-- The scanner only trusts issues visible in the current chunk and tells the model to return `{"findings": []}` when there are no meaningful findings.
-- Chunking can use vLLM's `/tokenize` endpoint for exact chunk sizing. `tokenizer_mode = "auto"` falls back to the old conservative heuristic when an endpoint does not expose tokenizer support.
-- The current client supports OpenAI-compatible `/v1/chat/completions` and `/v1/responses` payload shapes.
-- `--repo` currently supports public GitHub repositories only, and requires `git` to be installed and available on `PATH`.
-- `--trace` stores per-chunk prompt metadata in the raw chunk artifacts alongside the full buffered raw model response text.
-- `--max-files` is a testing helper that randomly caps the number of eligible files scanned in a run.
-- `thinking_token_budget` depends on server support. For vLLM, the endpoint needs reasoning enabled and configured for Qwen-style thinking output; otherwise the server may reject the request. If you are pointing the scanner at a different OpenAI-compatible provider, set `thinking_token_budget_enabled = false`.
-- `--research` runs after the initial scan and lets the model perform a final pass over its own outputs. The first pass remains a from-memory code review.
-- The final research pass can inspect scanner outputs on its own and optionally use `search_web` and `fetch_url` style tools when configured.
-- The research loop now forces a more disciplined workflow: it must inspect the scan results first, read the most important file reports, and when web search is configured it must perform at least one search plus one fetched external reference before it can finish.
-- Research tool outputs are paged to fit the configured request budget, using the same token-counting path as the scanner. Large file reports and fetched web pages can therefore be read section-by-section instead of overflowing a single request.
-- The built-in web search path uses DuckDuckGo HTML search and requires no extra Python dependency or local search service.
-- Optional web search still supports SearXNG if you want to point at your own instance.
-- The scanner system prompt lives in [src/vibe_code_scanner/scanner_system_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_system_prompt.txt) so you can tweak it without editing the Python prompt builder.
-- The post-scan research-agent prompt lives in [src/vibe_code_scanner/scanner_research_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_research_prompt.txt).
-- `--trace` now does three things: prints step-by-step trace lines with request slot ids in the terminal, stores rich per-chunk trace metadata in `raw/chunks/*.json`, and writes a run-level event stream to `raw/trace/events.jsonl`.
+The scanner prompt lives here:
+
+- [src/vibe_code_scanner/scanner_system_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_system_prompt.txt)
+
+The post-scan research prompt lives here:
+
+- [src/vibe_code_scanner/scanner_research_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_research_prompt.txt)
+
+So if you want to keep tuning the model behavior, those are the first files to mess with.

@@ -76,3 +76,26 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.research_max_tokens_per_request, 2048)
         self.assertEqual(config.research_thinking_token_budget, 8192)
+
+    def test_max_context_profile_rewrites_token_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = build_config(
+                {
+                    "__config_dir__": str(root),
+                    "root_path": ".",
+                    "export_dir": "scan-runs",
+                    "base_url": "http://127.0.0.1:8000",
+                    "model_name": "Qwen3.5-9B-local",
+                    "include_globs": ["**/*.py"],
+                    "max_context": True,
+                    "max_context_max_tokens_per_request": 81920,
+                    "max_context_total_context_window_tokens": 262144,
+                }
+            )
+
+        self.assertEqual(config.max_tokens_per_request, 81920)
+        self.assertEqual(config.chunk_target_tokens, 180224)
+        self.assertFalse(config.thinking_token_budget_enabled)
+        self.assertEqual(config.research_max_tokens_per_request, 81920)
+        self.assertIsNone(config.research_thinking_token_budget)
