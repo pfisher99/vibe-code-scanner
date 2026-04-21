@@ -1,0 +1,91 @@
+root_path = "."
+export_dir = "scan-runs"
+
+base_url = "http://127.0.0.1:8000"
+model_name = "Qwen/Qwen2.5-Coder-14B-Instruct"
+api_style = "chat_completions"
+
+scan_mode = "security_and_quality"
+
+max_concurrent_requests = 4
+max_tokens_per_request = 1200
+chunk_target_tokens = 1400
+chunk_overlap_tokens = 160
+
+request_timeout_seconds = 60.0
+retry_count = 2
+max_file_size_bytes = 1048576
+
+include_globs = [
+  "**/*.c",
+  "**/*.cc",
+  "**/*.cpp",
+  "**/*.cs",
+  "**/*.css",
+  "**/*.go",
+  "**/*.h",
+  "**/*.hpp",
+  "**/*.html",
+  "**/*.java",
+  "**/*.js",
+  "**/*.json",
+  "**/*.jsx",
+  "**/*.kt",
+  "**/*.kts",
+  "**/*.php",
+  "**/*.ps1",
+  "**/*.py",
+  "**/*.rb",
+  "**/*.rs",
+  "**/*.scala",
+  "**/*.sh",
+  "**/*.sql",
+  "**/*.svelte",
+  "**/*.swift",
+  "**/*.tf",
+  "**/*.toml",
+  "**/*.ts",
+  "**/*.tsx",
+  "**/*.vue",
+  "**/*.xml",
+  "**/*.yaml",
+  "**/*.yml",
+  "**/Dockerfile",
+]
+
+exclude_globs = [
+  "**/*.min.css",
+  "**/*.min.js",
+  "**/*.map",
+  "**/*.lock",
+  "**/package-lock.json",
+  "**/pnpm-lock.yaml",
+  "**/yarn.lock",
+]
+
+ignored_directories = [
+  ".git",
+  ".hg",
+  ".idea",
+  ".mypy_cache",
+  ".next",
+  ".nuxt",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".svn",
+  ".tox",
+  ".venv",
+  ".vscode",
+  "__pycache__",
+  "bin",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "obj",
+  "out",
+  "target",
+  "temp",
+  "tmp",
+  "venv",
+]
