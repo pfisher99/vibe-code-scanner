@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from vibe_code_scanner.chunking import chunk_text
-from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode
+from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode, TokenizerMode
 
 
 def make_config(root: Path) -> AppConfig:
@@ -24,6 +24,7 @@ def make_config(root: Path) -> AppConfig:
         include_globs=["**/*.py"],
         exclude_globs=[],
         ignored_directories=[],
+        tokenizer_mode=TokenizerMode.HEURISTIC,
     )
 
 
@@ -33,12 +34,18 @@ class ChunkingTests(unittest.TestCase):
             config = make_config(Path(temp_dir))
             text = "".join(f"line_{index} = '{index:02d}'\n" for index in range(1, 12))
 
-            chunks = chunk_text(text, config)
+            chunks = chunk_text(text, config, token_counter=_WhitespaceTokenCounter())
 
             self.assertGreater(len(chunks), 1)
             self.assertGreater(chunks[1].overlap_from_previous_lines, 0)
             self.assertLessEqual(chunks[1].start_line, chunks[0].end_line)
             self.assertEqual(chunks[-1].total_chunks, len(chunks))
+            self.assertLessEqual(chunks[0].estimated_tokens, config.chunk_target_tokens)
+
+
+class _WhitespaceTokenCounter:
+    def count(self, text: str) -> int:
+        return len(text.split())
 
 
 if __name__ == "__main__":

@@ -1,17 +1,14 @@
 from pathlib import Path
 import asyncio
-from contextlib import redirect_stdout
-import io
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from vibe_code_scanner.client import OpenAICompatibleClient
-from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode
-from vibe_code_scanner.tracing import LiveTracePrinter
+from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode, TokenizerMode
 
 
-def make_config(root: Path, *, trace: bool = False, trace_live: bool = False) -> AppConfig:
+def make_config(root: Path, *, trace: bool = False) -> AppConfig:
     return AppConfig(
         root_path=root,
         export_dir=root / "out",
@@ -30,83 +27,79 @@ def make_config(root: Path, *, trace: bool = False, trace_live: bool = False) ->
         exclude_globs=[],
         ignored_directories=[],
         trace_enabled=trace,
-        trace_live_enabled=trace_live,
+        tokenizer_mode=TokenizerMode.HEURISTIC,
     )
 
 
 class ClientTests(unittest.TestCase):
-    def test_streaming_chat_completions_accumulates_text_and_trace(self) -> None:
+    def test_chat_completion_payload_uses_configured_sampling_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            client = OpenAICompatibleClient(make_config(Path(temp_dir), trace=True, trace_live=True))
+            config = make_config(Path(temp_dir))
+            config.temperature = 0.6
+            config.top_p = 0.95
+            config.top_k = 20
+            config.min_p = 0.0
+            config.presence_penalty = 0.0
+            config.repetition_penalty = 1.0
+            client = OpenAICompatibleClient(config)
+
+            payload = client._build_payload(
+                [{"role": "user", "content": "review this"}],
+                use_response_format=True,
+            )
+
+        self.assertEqual(payload["temperature"], 0.6)
+        self.assertEqual(payload["top_p"], 0.95)
+        self.assertEqual(payload["top_k"], 20)
+        self.assertEqual(payload["min_p"], 0.0)
+        self.assertEqual(payload["presence_penalty"], 0.0)
+        self.assertEqual(payload["repetition_penalty"], 1.0)
+        self.assertEqual(payload["extra_body"]["thinking_token_budget"], 4096)
+
+    def test_chat_completion_payload_omits_thinking_budget_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = make_config(Path(temp_dir))
+            config.thinking_token_budget_enabled = False
+            client = OpenAICompatibleClient(config)
+
+            payload = client._build_payload(
+                [{"role": "user", "content": "review this"}],
+                use_response_format=True,
+            )
+
+        self.assertNotIn("extra_body", payload)
+
+    def test_chat_completion_payload_accepts_research_budget_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = make_config(Path(temp_dir))
+            client = OpenAICompatibleClient(config)
+
+            payload = client._build_payload(
+                [{"role": "user", "content": "review this"}],
+                use_response_format=True,
+                max_tokens_per_request=1024,
+                thinking_token_budget=2048,
+            )
+
+        self.assertEqual(payload["max_tokens"], 1024)
+        self.assertEqual(payload["extra_body"]["thinking_token_budget"], 2048)
+
+    def test_analyze_messages_captures_trace_request_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = OpenAICompatibleClient(make_config(Path(temp_dir), trace=True))
             messages = [{"role": "user", "content": "review this"}]
-            stdout_buffer = io.StringIO()
 
-            with (
-                patch("vibe_code_scanner.client.urllib.request.urlopen", return_value=_FakeSseResponse()),
-                redirect_stdout(stdout_buffer),
+            with patch.object(
+                client,
+                "_post_json",
+                return_value={"choices": [{"message": {"content": '{"findings":[]}'}}]},
             ):
-                response_text, raw_payload, trace = asyncio.run(
-                    client.analyze_messages(
-                        messages,
-                        trace_label="worker-1",
-                        live_trace_printer=LiveTracePrinter(),
-                    )
-                )
+                response_text, raw_payload, trace = asyncio.run(client.analyze_messages(messages))
 
-        self.assertEqual(response_text, "<think>checking</think>{\"findings\":[]}")
-        self.assertTrue(raw_payload["streamed"])
+        self.assertEqual(response_text, '{"findings":[]}')
+        self.assertEqual(raw_payload["choices"][0]["message"]["content"], '{"findings":[]}')
         self.assertIsNotNone(trace)
-        self.assertTrue(trace.used_streaming)
         self.assertEqual(trace.request_messages, messages)
-        output = stdout_buffer.getvalue()
-        self.assertIn("=== thinking: worker-1 ===", output)
-        self.assertIn("checking", output)
-        self.assertIn("=== end thinking ===", output)
-        self.assertNotIn('{"findings":[]}', output)
-
-    def test_live_trace_printer_focuses_on_first_thinking_stream_only(self) -> None:
-        printer = LiveTracePrinter()
-        stdout_buffer = io.StringIO()
-
-        with redirect_stdout(stdout_buffer):
-            printer.start("worker-1")
-            printer.start("worker-2")
-            printer.delta("worker-1", "<think>first stream")
-            printer.delta("worker-2", "<think>second stream")
-            printer.delta("worker-1", " continues</think>{\"findings\":[]}")
-            printer.finish("worker-1")
-            printer.finish("worker-2")
-
-        output = stdout_buffer.getvalue()
-        self.assertIn("=== thinking: worker-1 ===", output)
-        self.assertIn("first stream continues", output)
-        self.assertNotIn("worker-2", output)
-        self.assertNotIn("second stream", output)
-        self.assertNotIn('{"findings":', output)
-
-
-class _FakeHeaders:
-    def get_content_charset(self, default: str) -> str:
-        return default
-
-
-class _FakeSseResponse:
-    headers = _FakeHeaders()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def __iter__(self):
-        return iter(
-            [
-                b'data: {"choices":[{"delta":{"content":"<think>checking</think>"}}]}\n',
-                b'data: {"choices":[{"delta":{"content":"{\\"findings\\":[]}"}}]}\n',
-                b"data: [DONE]\n",
-            ]
-        )
 
 
 if __name__ == "__main__":

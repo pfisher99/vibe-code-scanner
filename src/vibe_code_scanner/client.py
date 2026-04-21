@@ -10,7 +10,6 @@ import urllib.request
 from typing import Any
 
 from .models import ApiStyle, AppConfig, ChunkTraceData
-from .tracing import LiveTracePrinter
 
 
 class ModelClientError(RuntimeError):
@@ -25,20 +24,17 @@ class OpenAICompatibleClient:
         self,
         messages: list[dict[str, str]],
         *,
-        trace_label: str | None = None,
-        live_trace_printer: LiveTracePrinter | None = None,
+        max_tokens_per_request: int | None = None,
+        thinking_token_budget: int | None = None,
     ) -> tuple[str, dict[str, Any], ChunkTraceData | None]:
         last_error: Exception | None = None
         use_response_format = True
-        use_streaming = self._config.trace_live_enabled and trace_label is not None and live_trace_printer is not None
         attempt = 0
         trace_data = (
             ChunkTraceData(
                 request_messages=deepcopy(messages) if self._config.trace_enabled else None,
-                used_streaming=False,
-                live_streaming_requested=use_streaming,
             )
-            if (self._config.trace_enabled or use_streaming)
+            if self._config.trace_enabled
             else None
         )
 
@@ -47,30 +43,14 @@ class OpenAICompatibleClient:
                 payload = self._build_payload(
                     messages,
                     use_response_format=use_response_format,
-                    use_streaming=use_streaming,
+                    max_tokens_per_request=max_tokens_per_request,
+                    thinking_token_budget=thinking_token_budget,
                 )
-                if use_streaming:
-                    response_text, response_json = await asyncio.to_thread(
-                        self._stream_json,
-                        payload,
-                        trace_label,
-                        live_trace_printer,
-                    )
-                    if trace_data is not None:
-                        trace_data.used_streaming = True
-                else:
-                    response_json = await asyncio.to_thread(self._post_json, payload)
-                    response_text = self._extract_response_text(response_json)
+                response_json = await asyncio.to_thread(self._post_json, payload)
+                response_text = self._extract_response_text(response_json)
                 return response_text, response_json, trace_data
             except _UnsupportedResponseFormat:
                 use_response_format = False
-                continue
-            except _UnsupportedStreaming as exc:
-                use_streaming = False
-                if trace_data is not None:
-                    trace_data.stream_fallback_reason = str(exc)
-                if live_trace_printer is not None and trace_label is not None:
-                    live_trace_printer.notice(trace_label, str(exc))
                 continue
             except Exception as exc:
                 last_error = exc
@@ -86,31 +66,53 @@ class OpenAICompatibleClient:
         messages: list[dict[str, str]],
         *,
         use_response_format: bool,
-        use_streaming: bool,
+        max_tokens_per_request: int | None = None,
+        thinking_token_budget: int | None = None,
     ) -> dict[str, Any]:
+        resolved_max_tokens = max_tokens_per_request or self._config.max_tokens_per_request
+        extra_body = self._build_extra_body(thinking_token_budget=thinking_token_budget)
         if self._config.api_style == ApiStyle.RESPONSES:
             payload: dict[str, Any] = {
                 "model": self._config.model_name,
                 "input": messages,
-                "max_output_tokens": self._config.max_tokens_per_request,
+                "max_output_tokens": resolved_max_tokens,
+                "temperature": self._config.temperature,
+                "top_p": self._config.top_p,
+                "presence_penalty": self._config.presence_penalty,
             }
             if use_response_format:
                 payload["text"] = {"format": {"type": "json_object"}}
-            if use_streaming:
-                payload["stream"] = True
+            if extra_body:
+                payload["extra_body"] = extra_body
             return payload
 
         payload = {
             "model": self._config.model_name,
             "messages": messages,
-            "max_tokens": self._config.max_tokens_per_request,
-            "temperature": 0,
+            "max_tokens": resolved_max_tokens,
+            "temperature": self._config.temperature,
+            "top_p": self._config.top_p,
+            "top_k": self._config.top_k,
+            "min_p": self._config.min_p,
+            "presence_penalty": self._config.presence_penalty,
+            "repetition_penalty": self._config.repetition_penalty,
         }
         if use_response_format:
             payload["response_format"] = {"type": "json_object"}
-        if use_streaming:
-            payload["stream"] = True
+        if extra_body:
+            payload["extra_body"] = extra_body
         return payload
+
+    def _build_extra_body(self, *, thinking_token_budget: int | None = None) -> dict[str, Any]:
+        extra_body: dict[str, Any] = {}
+        resolved_thinking_budget = (
+            thinking_token_budget
+            if thinking_token_budget is not None
+            else (self._config.thinking_token_budget if self._config.thinking_token_budget_enabled else None)
+        )
+        if resolved_thinking_budget is not None:
+            extra_body["thinking_token_budget"] = resolved_thinking_budget
+        return extra_body
 
     def _post_json(self, payload: dict[str, Any]) -> dict[str, Any]:
         endpoint = self._endpoint_url()
@@ -129,7 +131,7 @@ class OpenAICompatibleClient:
             if exc.code == 400 and "response_format" in error_text:
                 raise _UnsupportedResponseFormat() from exc
             raise ModelClientError(
-                f"HTTP {exc.code} from model endpoint {endpoint}: {error_text.strip()}"
+                self._format_http_error(endpoint, exc.code, error_text)
             ) from exc
         except urllib.error.URLError as exc:
             raise ModelClientError(f"Could not reach model endpoint {endpoint}: {exc.reason}") from exc
@@ -141,69 +143,6 @@ class OpenAICompatibleClient:
         if not isinstance(payload_json, dict):
             raise ModelClientError("Model endpoint returned an unexpected JSON shape.")
         return payload_json
-
-    def _stream_json(
-        self,
-        payload: dict[str, Any],
-        trace_label: str | None,
-        live_trace_printer: LiveTracePrinter | None,
-    ) -> tuple[str, dict[str, Any]]:
-        endpoint = self._endpoint_url()
-        body = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if self._config.api_key:
-            headers["Authorization"] = f"Bearer {self._config.api_key}"
-        request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-
-        started_trace = False
-        try:
-            with urllib.request.urlopen(request, timeout=self._config.request_timeout_seconds) as response:
-                charset = response.headers.get_content_charset("utf-8")
-                if live_trace_printer is not None and trace_label is not None:
-                    live_trace_printer.start(trace_label)
-                    started_trace = True
-                parts: list[str] = []
-                event_count = 0
-                for raw_line in response:
-                    line = raw_line.decode(charset).strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    event_count += 1
-                    try:
-                        event_payload = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    delta_text = self._extract_stream_delta_text(event_payload)
-                    if delta_text:
-                        parts.append(delta_text)
-                        if live_trace_printer is not None and trace_label is not None:
-                            live_trace_printer.delta(trace_label, delta_text)
-        except urllib.error.HTTPError as exc:
-            error_text = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 400 and "response_format" in error_text:
-                raise _UnsupportedResponseFormat() from exc
-            if exc.code == 400 and "stream" in error_text.lower():
-                raise _UnsupportedStreaming("Streaming not supported by this endpoint, falling back to buffered mode.") from exc
-            raise ModelClientError(
-                f"HTTP {exc.code} from model endpoint {endpoint}: {error_text.strip()}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise ModelClientError(f"Could not reach model endpoint {endpoint}: {exc.reason}") from exc
-        finally:
-            if started_trace and live_trace_printer is not None and trace_label is not None:
-                live_trace_printer.finish(trace_label)
-
-        response_text = "".join(parts)
-        if not response_text.strip():
-            raise ModelClientError("Streaming response completed without any text content.")
-        return response_text, {
-            "streamed": True,
-            "api_style": self._config.api_style.value,
-            "event_count": event_count,
-        }
 
     def _endpoint_url(self) -> str:
         base = self._config.base_url.rstrip("/")
@@ -249,50 +188,17 @@ class OpenAICompatibleClient:
                 return "\n".join(parts)
         raise ModelClientError("Chat completions payload did not contain text content.")
 
-    def _extract_stream_delta_text(self, payload: dict[str, Any]) -> str:
-        if self._config.api_style == ApiStyle.RESPONSES:
-            event_type = str(payload.get("type", ""))
-            if event_type.endswith(".delta"):
-                return self._coerce_text(payload.get("delta"))
-            return ""
-
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            return ""
-        delta = choices[0].get("delta", {})
-        if not isinstance(delta, dict):
-            return ""
-
-        parts = [
-            self._coerce_text(delta.get("content")),
-            self._coerce_text(delta.get("text")),
-            self._coerce_text(delta.get("reasoning_content")),
-            self._coerce_text(delta.get("reasoning")),
-        ]
-        return "".join(part for part in parts if part)
-
-    def _coerce_text(self, value: Any) -> str:
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    for key in ("text", "content", "reasoning_content"):
-                        text_value = item.get(key)
-                        if isinstance(text_value, str):
-                            parts.append(text_value)
-            return "".join(parts)
-        if isinstance(value, dict):
-            return self._coerce_text([value])
-        return ""
+    def _format_http_error(self, endpoint: str, status_code: int, error_text: str) -> str:
+        normalized = error_text.strip() or "No error body returned."
+        message = f"HTTP {status_code} from model endpoint {endpoint}: {normalized}"
+        if self._config.thinking_token_budget_enabled:
+            message += (
+                " If thinking_token_budget is enabled, make sure the endpoint supports"
+                " extra_body.thinking_token_budget and that vLLM was started with a"
+                " reasoning parser/config for Qwen-style thinking output."
+            )
+        return message
 
 
 class _UnsupportedResponseFormat(Exception):
-    pass
-
-
-class _UnsupportedStreaming(Exception):
     pass

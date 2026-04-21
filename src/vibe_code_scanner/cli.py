@@ -29,24 +29,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--trace",
         action="store_true",
         default=None,
-        help="Persist per-chunk prompt and streaming metadata in raw artifacts.",
-    )
-    parser.add_argument(
-        "--trace-live",
-        action="store_true",
-        default=None,
-        help="Stream raw model output live while chunks are being analyzed.",
+        help="Persist per-chunk prompt metadata in raw artifacts.",
     )
     parser.add_argument(
         "--research",
         action="store_true",
         default=None,
-        help="Enrich the scan with dependency version and vulnerability research.",
+        help="Run a final LLM-guided research pass over the completed scan outputs.",
     )
     parser.add_argument(
         "--search-backend",
-        choices=["none", "searxng"],
-        help="Optional search backend used during research enrichment.",
+        choices=["none", "searxng", "duckduckgo"],
+        help="Optional search backend available to the final research pass.",
     )
     parser.add_argument(
         "--search-base-url",
@@ -66,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-concurrency",
         type=int,
         help="Maximum concurrent requests override.",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        help="Testing helper: scan only a random subset of this many eligible files.",
     )
     parser.add_argument(
         "--log-level",
@@ -98,13 +97,13 @@ def main(argv: list[str] | None = None) -> int:
                 "base_url": args.base_url,
                 "model_name": args.model,
                 "trace": args.trace,
-                "trace_live": args.trace_live,
                 "research": args.research,
                 "search_backend": args.search_backend,
                 "search_base_url": args.search_base_url,
                 "scan_mode": args.scan_mode,
                 "api_style": args.api_style,
                 "max_concurrent_requests": args.max_concurrency,
+                "max_files": args.max_files,
             }
 
             try:

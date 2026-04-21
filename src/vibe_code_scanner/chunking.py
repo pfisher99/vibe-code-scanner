@@ -1,49 +1,53 @@
-"""Token-approximate file chunking with configurable overlap."""
+"""Token-aware file chunking with configurable overlap."""
 
 from __future__ import annotations
 
-import math
-
 from .models import AppConfig, CodeChunk
+from .tokenization import TokenCounter, build_token_counter
 
 
-def estimate_tokens(text: str) -> int:
-    """Conservative character-based estimate until a tokenizer is plugged in."""
-
-    if not text:
-        return 0
-    return max(1, math.ceil(len(text) / 3.5))
-
-
-def chunk_text(text: str, config: AppConfig) -> list[CodeChunk]:
+def chunk_text(
+    text: str,
+    config: AppConfig,
+    token_counter: TokenCounter | None = None,
+) -> list[CodeChunk]:
     lines = text.splitlines(keepends=True)
     if not lines:
         return []
 
-    line_tokens = [estimate_tokens(line) for line in lines]
+    token_counter = token_counter or build_token_counter(config)
+    line_offsets = [0]
+    for line in lines:
+        line_offsets.append(line_offsets[-1] + len(line))
+
+    span_token_cache: dict[tuple[int, int], int] = {}
+
+    def count_span(start_index: int, end_index: int) -> int:
+        if start_index >= end_index:
+            return 0
+        key = (start_index, end_index)
+        if key not in span_token_cache:
+            span_text = text[line_offsets[start_index] : line_offsets[end_index]]
+            span_token_cache[key] = token_counter.count(span_text)
+        return span_token_cache[key]
+
     raw_chunks: list[dict] = []
     start_index = 0
 
     while start_index < len(lines):
-        end_index = start_index
-        token_total = 0
-
-        while end_index < len(lines):
-            next_tokens = line_tokens[end_index]
-            if end_index > start_index and token_total + next_tokens > config.chunk_target_tokens:
-                break
-            token_total += next_tokens
-            end_index += 1
-
-        if end_index == start_index:
-            token_total = line_tokens[start_index]
-            end_index += 1
+        end_index = _find_chunk_end(
+            start_index,
+            len(lines),
+            config.chunk_target_tokens,
+            count_span,
+        )
+        token_total = count_span(start_index, end_index)
 
         raw_chunks.append(
             {
                 "start_index": start_index,
                 "end_index": end_index,
-                "text": "".join(lines[start_index:end_index]),
+                "text": text[line_offsets[start_index] : line_offsets[end_index]],
                 "estimated_tokens": token_total,
             }
         )
@@ -51,16 +55,12 @@ def chunk_text(text: str, config: AppConfig) -> list[CodeChunk]:
         if end_index >= len(lines):
             break
 
-        overlap_tokens = 0
-        overlap_lines = 0
-        rewind_index = end_index - 1
-        while rewind_index >= start_index and overlap_tokens < config.chunk_overlap_tokens:
-            overlap_tokens += line_tokens[rewind_index]
-            overlap_lines += 1
-            rewind_index -= 1
-
-        next_start = max(start_index + 1, end_index - overlap_lines)
-        start_index = next_start
+        start_index = _find_next_start(
+            start_index,
+            end_index,
+            config.chunk_overlap_tokens,
+            count_span,
+        )
 
     total_chunks = len(raw_chunks)
     chunks: list[CodeChunk] = []
@@ -70,7 +70,9 @@ def chunk_text(text: str, config: AppConfig) -> list[CodeChunk]:
         start_line = raw_chunk["start_index"] + 1
         end_line = raw_chunk["end_index"]
         overlap_lines = max(0, previous_end - raw_chunk["start_index"])
-        overlap_tokens = sum(line_tokens[raw_chunk["start_index"] : previous_end]) if overlap_lines else 0
+        overlap_tokens = (
+            count_span(raw_chunk["start_index"], previous_end) if overlap_lines else 0
+        )
         chunks.append(
             CodeChunk(
                 chunk_index=index,
@@ -85,3 +87,47 @@ def chunk_text(text: str, config: AppConfig) -> list[CodeChunk]:
         )
         previous_end = raw_chunk["end_index"]
     return chunks
+
+
+def _find_chunk_end(
+    start_index: int,
+    total_lines: int,
+    chunk_target_tokens: int,
+    count_span,
+) -> int:
+    low = start_index + 1
+    high = total_lines
+    best_end = start_index + 1
+
+    while low <= high:
+        mid = (low + high) // 2
+        if count_span(start_index, mid) <= chunk_target_tokens:
+            best_end = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best_end
+
+
+def _find_next_start(
+    start_index: int,
+    end_index: int,
+    overlap_target_tokens: int,
+    count_span,
+) -> int:
+    if overlap_target_tokens <= 0:
+        return end_index
+
+    candidate = start_index
+    low = start_index
+    high = end_index - 1
+
+    while low <= high:
+        mid = (low + high) // 2
+        if count_span(mid, end_index) >= overlap_target_tokens:
+            candidate = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    return max(start_index + 1, candidate)

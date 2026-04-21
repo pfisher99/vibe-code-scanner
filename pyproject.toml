@@ -20,3 +20,6 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+vibe_code_scanner = ["scanner_system_prompt.txt", "scanner_research_prompt.txt"]

@@ -2,18 +2,9 @@
 
 from __future__ import annotations
 
+from importlib import resources
+
 from .models import CodeChunk, ScanMode, SourceFile
-
-SYSTEM_PROMPT = """You are reviewing a chunk of source code from a larger repository.
-
-Your task is to identify likely security flaws, correctness risks, suspicious patterns, and notable bad coding practices visible in this chunk alone.
-
-Be conservative. Do not invent issues. Do not assume hidden context unless the shown code strongly implies it. If there are no meaningful findings, return an empty findings array.
-
-Only assess the code shown. Do not speculate about unseen files, hidden frameworks, deployment settings, or runtime behavior unless the shown code makes that risk likely.
-
-Return JSON only. No markdown. No prose outside JSON.
-"""
 
 SCHEMA_BLOCK = """JSON schema:
 {
@@ -33,6 +24,12 @@ SCHEMA_BLOCK = """JSON schema:
 }"""
 
 
+def load_system_prompt() -> str:
+    return resources.files("vibe_code_scanner").joinpath("scanner_system_prompt.txt").read_text(
+        encoding="utf-8"
+    ).strip()
+
+
 def build_messages(source_file: SourceFile, chunk: CodeChunk, scan_mode: ScanMode) -> list[dict[str, str]]:
     mode_block = _mode_block(scan_mode)
     overlap_note = (
@@ -44,7 +41,7 @@ def build_messages(source_file: SourceFile, chunk: CodeChunk, scan_mode: ScanMod
     user_prompt = f"""Repository-relative path: {source_file.relative_path}
 Chunk: {chunk.chunk_index} of {chunk.total_chunks}
 Approximate file line range covered: {chunk.start_line}-{chunk.end_line}
-Approximate input tokens in this chunk: {chunk.estimated_tokens}
+Chunk token count: {chunk.estimated_tokens}
 Scan mode: {scan_mode.value}
 {overlap_note}
 
@@ -75,7 +72,7 @@ Source code:
 ```"""
 
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": load_system_prompt()},
         {"role": "user", "content": user_prompt},
     ]
 

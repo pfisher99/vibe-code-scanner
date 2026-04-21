@@ -1,10 +1,25 @@
 from pathlib import Path
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode, SearchBackend, SourceFile
-from vibe_code_scanner.research import DependencyResearcher
+from vibe_code_scanner.models import (
+    ApiStyle,
+    AppConfig,
+    Category,
+    Confidence,
+    FileScanResult,
+    NormalizedFinding,
+    ScanMode,
+    ScanSourceKind,
+    ScanSourceMetadata,
+    SearchBackend,
+    Severity,
+    SourceFile,
+    TokenizerMode,
+)
+from vibe_code_scanner.research import PostScanResearcher
 
 
 def make_config(root: Path) -> AppConfig:
@@ -22,87 +37,231 @@ def make_config(root: Path) -> AppConfig:
         request_timeout_seconds=10.0,
         retry_count=1,
         max_file_size_bytes=1024 * 1024,
-        include_globs=["**/*.py", "**/*.json", "**/*.toml", "**/requirements.txt"],
+        include_globs=["**/*.py"],
         exclude_globs=[],
         ignored_directories=[],
         research_enabled=True,
-        search_backend=SearchBackend.SEARXNG,
-        search_base_url="http://search.local",
+        search_backend=SearchBackend.NONE,
+        search_base_url=None,
         research_max_results=2,
+        tokenizer_mode=TokenizerMode.HEURISTIC,
     )
 
 
 class ResearchTests(unittest.TestCase):
-    def test_dependency_researcher_extracts_versions_vulns_and_search_results(self) -> None:
+    def test_post_scan_researcher_runs_tool_loop_over_scan_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            package_json = root / "package.json"
-            package_json.write_text(
-                '{"dependencies":{"express":"4.18.2"},"devDependencies":{"eslint":"^9.0.0"}}',
-                encoding="utf-8",
-            )
-            requirements_txt = root / "requirements.txt"
-            requirements_txt.write_text("requests==2.31.0\nflask>=3.0\n", encoding="utf-8")
-            pyproject = root / "pyproject.toml"
-            pyproject.write_text(
-                """
-[project]
-dependencies = ["httpx==0.27.0"]
-
-[tool.poetry.dependencies]
-python = "^3.11"
-fastapi = "0.115.0"
-""".strip(),
-                encoding="utf-8",
-            )
-            source_files = [
-                SourceFile(root, package_json, "package.json", package_json.stat().st_size, "json"),
-                SourceFile(root, requirements_txt, "requirements.txt", requirements_txt.stat().st_size, "text"),
-                SourceFile(root, pyproject, "pyproject.toml", pyproject.stat().st_size, "toml"),
+            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text("# app.py\n\n## Findings\n\n- shell=True\n", encoding="utf-8")
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[
+                        NormalizedFinding(
+                            file_path="app.py",
+                            chunk_ids=[1],
+                            title="Potential command injection",
+                            category=Category.SECURITY,
+                            severity=Severity.HIGH,
+                            confidence=Confidence.HIGH,
+                            line_start=1,
+                            line_end=1,
+                            explanation="Test finding.",
+                            evidence="shell=True",
+                            remediation="Avoid shell execution.",
+                        )
+                    ],
+                    errors=[],
+                )
             ]
 
-            def fake_fetch_json(self, url: str):
-                if "registry.npmjs.org" in url:
-                    return {"dist-tags": {"latest": "5.1.0"}}
-                if "pypi.org" in url:
-                    package_name = url.split("/")[-2]
-                    return {"info": {"version": f"{package_name}-latest"}}
-                if "search.local" in url:
-                    return {
-                        "results": [
-                            {"title": "Advisory", "url": "https://example.com/advisory", "content": "snippet"}
-                        ]
-                    }
-                raise AssertionError(f"Unexpected URL: {url}")
+            client = _StubClient(
+                [
+                    'I will inspect the findings first.\n{"action":"list_findings"}',
+                    'The report matters more than speculation.\n{"action":"read_file_report","file_path":"app.py"}',
+                    '{"action":"finish","report_markdown":"# Final Research Report\\n\\nInvestigate command execution first."}',
+                ]
+            )
 
-            def fake_post_json(self, url: str, payload: dict):
-                if payload["package"]["name"] == "express":
-                    return {
-                        "vulns": [
+            summary = asyncio.run(
+                PostScanResearcher(make_config(root)).run(
+                    client,
+                    file_results,
+                    ScanSourceMetadata(kind=ScanSourceKind.LOCAL_PATH, label=str(root)),
+                )
+            )
+
+        self.assertEqual(len(summary.tool_calls), 2)
+        self.assertEqual(summary.files_consulted, ["app.py"])
+        self.assertIn("Investigate command execution first.", summary.report_markdown)
+
+    def test_read_file_report_is_paged_by_token_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = make_config(root)
+            config.chunk_target_tokens = 40
+            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text(
+                "\n".join(f"- Finding line {index}: shell=True and subprocess usage" for index in range(1, 21)),
+                encoding="utf-8",
+            )
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[],
+                    errors=[],
+                )
+            ]
+
+            researcher = PostScanResearcher(config)
+            first_section = researcher._read_file_report(file_results, "app.py", section_index=1)
+            second_section = researcher._read_file_report(
+                file_results,
+                "app.py",
+                section_index=int(first_section["next_section_index"]),
+            )
+
+        self.assertTrue(first_section["truncated"])
+        self.assertGreater(first_section["total_sections"], 1)
+        self.assertEqual(first_section["section_index"], 1)
+        self.assertEqual(second_section["section_index"], 2)
+        self.assertNotEqual(first_section["report_markdown"], second_section["report_markdown"])
+
+    def test_post_scan_researcher_can_use_search_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = make_config(root)
+            config.search_backend = SearchBackend.SEARXNG
+            config.search_base_url = "http://search.local"
+            config.research_max_tokens_per_request = 2048
+            config.research_thinking_token_budget = 8192
+            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text("# app.py\n", encoding="utf-8")
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[
+                        NormalizedFinding(
+                            file_path="app.py",
+                            chunk_ids=[1],
+                            title="Potential command injection",
+                            category=Category.SECURITY,
+                            severity=Severity.HIGH,
+                            confidence=Confidence.HIGH,
+                            line_start=1,
+                            line_end=1,
+                            explanation="Test finding.",
+                            evidence="shell=True",
+                            remediation="Avoid shell execution.",
+                        )
+                    ],
+                    errors=[],
+                )
+            ]
+            client = _StubClient(
+                [
+                    '{"action":"finish","report_markdown":"# Final Research Report\\n\\nDone too early."}',
+                    '{"action":"list_findings"}',
+                    '{"action":"read_file_report","file_path":"app.py"}',
+                    '{"action":"search_web","query":"python shell true command injection"}',
+                    '{"action":"fetch_url","url":"https://owasp.org/example"}',
+                    '{"action":"finish","report_markdown":"# Final Research Report\\n\\nDone."}',
+                ]
+            )
+
+            with (
+                patch.object(
+                    PostScanResearcher,
+                    "_fetch_json",
+                    return_value={
+                        "results": [
                             {
-                                "id": "GHSA-test-1234",
-                                "summary": "Known vuln",
-                                "aliases": ["CVE-2024-0001"],
-                                "severity": [{"type": "CVSS_V3", "score": "HIGH"}],
-                                "references": [{"type": "ADVISORY", "url": "https://osv.dev/vuln/123"}],
+                                "title": "OWASP Command Injection",
+                                "url": "https://owasp.org/example",
+                                "content": "Overview of command injection risks.",
                             }
                         ]
-                    }
-                return {"vulns": []}
-
-            with patch.object(DependencyResearcher, "_fetch_json", new=fake_fetch_json), patch.object(
-                DependencyResearcher, "_post_json", new=fake_post_json
+                    },
+                ),
+                patch.object(
+                    PostScanResearcher,
+                    "_fetch_url_sync",
+                    return_value={
+                        "url": "https://owasp.org/example",
+                        "title": "OWASP Command Injection",
+                        "section_index": 1,
+                        "total_sections": 1,
+                        "content_excerpt": "Command injection guidance from OWASP.",
+                        "truncated": False,
+                        "next_section_index": None,
+                    },
+                ),
             ):
-                summary = DependencyResearcher(make_config(root)).run(source_files)
+                summary = asyncio.run(
+                    PostScanResearcher(config).run(
+                        client,
+                        file_results,
+                        ScanSourceMetadata(kind=ScanSourceKind.LOCAL_PATH, label=str(root)),
+                    )
+                )
 
-        self.assertEqual(summary.total_dependencies, 6)
-        self.assertEqual(summary.vulnerable_dependencies, 1)
-        express = next(item for item in summary.dependencies if item.name == "express")
-        self.assertEqual(express.latest_version, "5.1.0")
-        self.assertEqual(express.vulnerabilities[0].id, "GHSA-test-1234")
-        self.assertEqual(len(express.search_results), 1)
-        flask = next(item for item in summary.dependencies if item.name == "flask")
-        self.assertIsNone(flask.resolved_version)
+        self.assertEqual(summary.search_queries, ["python shell true command injection"])
+        self.assertEqual(len(summary.references), 1)
+        self.assertEqual(summary.references[0].title, "OWASP Command Injection")
+        self.assertEqual(summary.files_consulted, ["app.py"])
+        self.assertEqual([call.action for call in summary.tool_calls], ["list_findings", "read_file_report", "search_web", "fetch_url"])
+        self.assertEqual(client.calls[0]["max_tokens_per_request"], 2048)
+        self.assertEqual(client.calls[0]["thinking_token_budget"], 8192)
+
+    def test_duckduckgo_search_results_are_parsed_without_extra_service(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = make_config(root)
+            config.search_backend = SearchBackend.DUCKDUCKGO
+            researcher = PostScanResearcher(config)
+
+            with patch.object(
+                PostScanResearcher,
+                "_fetch_text",
+                return_value="""
+                <html><body>
+                  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fowasp.org%2Fwww-project-web-security-testing-guide%2F">OWASP WSTG</a>
+                  <a class="result__snippet">Web security testing guidance from OWASP.</a>
+                  <a class="result__a" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP">MDN CSP</a>
+                  <div class="result__snippet">Content Security Policy documentation.</div>
+                </body></html>
+                """,
+            ):
+                results = researcher._search_web_sync("xss csp guidance")
+
+        self.assertEqual(results["query"], "xss csp guidance")
+        self.assertEqual(len(results["results"]), 2)
+        self.assertEqual(results["results"][0]["url"], "https://owasp.org/www-project-web-security-testing-guide/")
+        self.assertEqual(results["results"][0]["title"], "OWASP WSTG")
+        self.assertIn("OWASP", results["results"][0]["snippet"])
+
+
+class _StubClient:
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = iter(responses)
+        self.calls: list[dict[str, object]] = []
+
+    async def analyze_messages(self, _messages, **_kwargs):
+        self.calls.append(dict(_kwargs))
+        return next(self._responses), {"id": "stub"}, None
 
 
 if __name__ == "__main__":

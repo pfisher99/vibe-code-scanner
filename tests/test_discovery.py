@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from vibe_code_scanner.discovery import discover_source_files
-from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode
+from vibe_code_scanner.models import ApiStyle, AppConfig, ScanMode, TokenizerMode
 
 
 def make_config(root: Path) -> AppConfig:
@@ -24,6 +24,7 @@ def make_config(root: Path) -> AppConfig:
         include_globs=["**/*.py"],
         exclude_globs=[],
         ignored_directories=["node_modules"],
+        tokenizer_mode=TokenizerMode.HEURISTIC,
     )
 
 

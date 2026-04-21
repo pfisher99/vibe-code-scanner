@@ -19,11 +19,20 @@ from .defaults import (
     DEFAULT_MAX_CONCURRENT_REQUESTS,
     DEFAULT_MAX_FILE_SIZE_BYTES,
     DEFAULT_MAX_TOKENS_PER_REQUEST,
+    DEFAULT_MIN_P,
+    DEFAULT_PRESENCE_PENALTY,
+    DEFAULT_REPETITION_PENALTY,
     DEFAULT_RESEARCH_MAX_RESULTS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_RETRY_COUNT,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_THINKING_TOKEN_BUDGET,
+    DEFAULT_THINKING_TOKEN_BUDGET_ENABLED,
+    DEFAULT_TOKENIZER_MODE,
+    DEFAULT_TOP_K,
+    DEFAULT_TOP_P,
 )
-from .models import ApiStyle, AppConfig, ScanMode, SearchBackend
+from .models import ApiStyle, AppConfig, ScanMode, SearchBackend, TokenizerMode
 
 
 class ConfigError(ValueError):
@@ -98,7 +107,6 @@ def build_config(raw: Mapping[str, Any]) -> AppConfig:
         ignored_directories=ignored_directories,
         api_key=api_key,
         trace_enabled=_parse_bool(_get(raw, "trace", False), "trace"),
-        trace_live_enabled=_parse_bool(_get(raw, "trace_live", False), "trace_live"),
         research_enabled=_parse_bool(_get(raw, "research", False), "research"),
         search_backend=_parse_search_backend(_get(raw, "search_backend", SearchBackend.NONE.value)),
         search_base_url=_parse_optional_str(_get(raw, "search_base_url", None)),
@@ -106,6 +114,33 @@ def build_config(raw: Mapping[str, Any]) -> AppConfig:
             _get(raw, "research_max_results", DEFAULT_RESEARCH_MAX_RESULTS),
             "research_max_results",
         ),
+        tokenizer_mode=_parse_tokenizer_mode(_get(raw, "tokenizer_mode", DEFAULT_TOKENIZER_MODE)),
+        temperature=_non_negative_float(_get(raw, "temperature", DEFAULT_TEMPERATURE), "temperature"),
+        top_p=_probability_float(_get(raw, "top_p", DEFAULT_TOP_P), "top_p"),
+        top_k=_non_negative_int(_get(raw, "top_k", DEFAULT_TOP_K), "top_k"),
+        min_p=_probability_float(_get(raw, "min_p", DEFAULT_MIN_P), "min_p"),
+        presence_penalty=_float_value(_get(raw, "presence_penalty", DEFAULT_PRESENCE_PENALTY), "presence_penalty"),
+        repetition_penalty=_positive_float(
+            _get(raw, "repetition_penalty", DEFAULT_REPETITION_PENALTY),
+            "repetition_penalty",
+        ),
+        thinking_token_budget_enabled=_parse_bool(
+            _get(raw, "thinking_token_budget_enabled", DEFAULT_THINKING_TOKEN_BUDGET_ENABLED),
+            "thinking_token_budget_enabled",
+        ),
+        thinking_token_budget=_positive_int(
+            _get(raw, "thinking_token_budget", DEFAULT_THINKING_TOKEN_BUDGET),
+            "thinking_token_budget",
+        ),
+        research_max_tokens_per_request=_optional_positive_int(
+            _get(raw, "research_max_tokens_per_request", None),
+            "research_max_tokens_per_request",
+        ),
+        research_thinking_token_budget=_optional_positive_int(
+            _get(raw, "research_thinking_token_budget", None),
+            "research_thinking_token_budget",
+        ),
+        max_files=_optional_positive_int(_get(raw, "max_files", None), "max_files"),
     )
     _validate_config(config)
     return config
@@ -145,6 +180,12 @@ def _positive_int(value: Any, field_name: str) -> int:
     return parsed
 
 
+def _optional_positive_int(value: Any, field_name: str) -> int | None:
+    if value in (None, "", 0, "0"):
+        return None
+    return _positive_int(value, field_name)
+
+
 def _non_negative_int(value: Any, field_name: str) -> int:
     try:
         parsed = int(value)
@@ -163,6 +204,33 @@ def _positive_float(value: Any, field_name: str) -> float:
     if parsed <= 0:
         raise ConfigError(f"{field_name} must be greater than zero.")
     return parsed
+
+
+def _non_negative_float(value: Any, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field_name} must be a number.") from exc
+    if parsed < 0:
+        raise ConfigError(f"{field_name} must be zero or greater.")
+    return parsed
+
+
+def _probability_float(value: Any, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field_name} must be a number.") from exc
+    if parsed < 0 or parsed > 1:
+        raise ConfigError(f"{field_name} must be between 0 and 1.")
+    return parsed
+
+
+def _float_value(value: Any, field_name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{field_name} must be a number.") from exc
 
 
 def _parse_bool(value: Any, field_name: str) -> bool:
@@ -216,6 +284,15 @@ def _parse_search_backend(value: Any) -> SearchBackend:
         raise ConfigError(f"search_backend must be one of: {options}") from exc
 
 
+def _parse_tokenizer_mode(value: Any) -> TokenizerMode:
+    normalized = str(value).strip().lower()
+    try:
+        return TokenizerMode(normalized)
+    except ValueError as exc:
+        options = ", ".join(mode.value for mode in TokenizerMode)
+        raise ConfigError(f"tokenizer_mode must be one of: {options}") from exc
+
+
 def _validate_config(config: AppConfig) -> None:
     if not config.root_path.exists():
         raise ConfigError(f"Scan root does not exist: {config.root_path}")
@@ -229,8 +306,8 @@ def _validate_config(config: AppConfig) -> None:
         raise ConfigError("chunk_overlap_tokens must be smaller than chunk_target_tokens.")
     if not config.include_globs:
         raise ConfigError("include_globs must contain at least one pattern.")
-    if config.search_backend != SearchBackend.NONE and not config.search_base_url:
-        raise ConfigError("search_base_url is required when search_backend is enabled.")
+    if config.search_backend == SearchBackend.SEARXNG and not config.search_base_url:
+        raise ConfigError("search_base_url is required when search_backend is set to searxng.")
 
 
 def _resolve_path(value: Any, base_dir: Path) -> Path:

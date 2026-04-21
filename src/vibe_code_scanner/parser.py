@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from json import JSONDecodeError
+import re
+from typing import Any
 
 from .models import Category, CodeChunk, Confidence, NormalizedFinding, ParsedFinding, Severity, SourceFile
 
@@ -13,7 +15,7 @@ class ResponseParseError(ValueError):
 
 
 def parse_findings(response_text: str) -> list[ParsedFinding]:
-    payload = _load_json_payload(response_text)
+    payload = load_json_object(response_text)
     findings = payload.get("findings")
     if findings is None:
         raise ResponseParseError("Response JSON did not contain a 'findings' field.")
@@ -72,24 +74,42 @@ def normalize_findings(
     return normalized
 
 
-def _load_json_payload(response_text: str) -> dict:
-    cleaned = response_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = _strip_code_fences(cleaned)
+def load_json_object(response_text: str) -> dict[str, Any]:
+    cleaned = _clean_response_text(response_text)
     try:
         payload = json.loads(cleaned)
-    except JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
-            raise ResponseParseError("Response did not contain valid JSON.")
-        try:
-            payload = json.loads(cleaned[start : end + 1])
-        except JSONDecodeError as exc:
-            raise ResponseParseError(f"Response JSON could not be parsed: {exc}") from exc
+    except JSONDecodeError as whole_error:
+        last_error = whole_error
+        for candidate in _iter_json_object_candidates(cleaned):
+            try:
+                payload = json.loads(candidate)
+                break
+            except JSONDecodeError as exc:
+                repaired = _repair_jsonish_text(candidate)
+                if repaired is not None:
+                    try:
+                        payload = json.loads(repaired)
+                        break
+                    except JSONDecodeError:
+                        last_error = exc
+                        continue
+                last_error = exc
+        else:
+            if "{" not in cleaned or "}" not in cleaned:
+                raise ResponseParseError("Response did not contain valid JSON.") from whole_error
+            raise ResponseParseError(f"Response JSON could not be parsed: {last_error}") from last_error
     if not isinstance(payload, dict):
         raise ResponseParseError("Response JSON root must be an object.")
     return payload
+
+
+def _clean_response_text(response_text: str) -> str:
+    cleaned = response_text.strip()
+    cleaned = _strip_think_blocks(cleaned)
+    cleaned = cleaned.strip()
+    if cleaned.startswith("```"):
+        cleaned = _strip_code_fences(cleaned)
+    return cleaned.strip()
 
 
 def _strip_code_fences(text: str) -> str:
@@ -99,6 +119,59 @@ def _strip_code_fences(text: str) -> str:
     if lines and lines[-1].startswith("```"):
         lines = lines[:-1]
     return "\n".join(lines)
+
+
+_THINK_BLOCK_PATTERN = re.compile(r"(?is)<think>.*?</think>")
+_UNQUOTED_KEY_PATTERN = re.compile(r'([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)')
+_TRAILING_COMMA_PATTERN = re.compile(r",(\s*[}\]])")
+
+
+def _strip_think_blocks(text: str) -> str:
+    return _THINK_BLOCK_PATTERN.sub("", text)
+
+
+def _iter_json_object_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    depth = 0
+    start_index: int | None = None
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start_index = index
+            depth += 1
+            continue
+        if char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                candidates.append(text[start_index : index + 1])
+                start_index = None
+
+    candidates.reverse()
+    return candidates
+
+
+def _repair_jsonish_text(text: str) -> str | None:
+    repaired = text.strip()
+    if not repaired:
+        return None
+    repaired = _UNQUOTED_KEY_PATTERN.sub(r'\1"\2"\3', repaired)
+    repaired = _TRAILING_COMMA_PATTERN.sub(r"\1", repaired)
+    return repaired if repaired != text else None
 
 
 def _parse_category(value: object) -> Category:

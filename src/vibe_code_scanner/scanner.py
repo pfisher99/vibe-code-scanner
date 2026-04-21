@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,11 +21,12 @@ from .models import (
     RunSummary,
     ScanSourceKind,
     ScanSourceMetadata,
+    SkippedPath,
     SourceFile,
 )
 from .parser import ResponseParseError, normalize_findings, parse_findings
 from .prompting import build_messages
-from .research import DependencyResearcher
+from .research import PostScanResearcher
 from .reporting import (
     initialize_run_dir,
     write_chunk_artifact,
@@ -35,7 +37,7 @@ from .reporting import (
     write_research_artifact,
     write_research_report,
 )
-from .tracing import LiveTracePrinter
+from .tokenization import TokenizationError
 
 LOGGER = logging.getLogger("vibe_code_scanner")
 
@@ -47,7 +49,7 @@ class RepositoryScanner:
         self._progress_lock = asyncio.Lock()
         self._total_files = 0
         self._completed_files = 0
-        self._live_trace_printer = LiveTracePrinter() if config.trace_live_enabled else None
+        self._eligible_files_before_limit = 0
         self._source_metadata = source_metadata or ScanSourceMetadata(
             kind=ScanSourceKind.LOCAL_PATH,
             label=str(config.root_path),
@@ -59,6 +61,8 @@ class RepositoryScanner:
         run_dir = initialize_run_dir(self._config.export_dir, run_id)
 
         source_files, skipped_paths = discover_source_files(self._config)
+        self._eligible_files_before_limit = len(source_files)
+        source_files, skipped_paths = self._apply_max_files_limit(source_files, skipped_paths)
         self._total_files = len(source_files)
         self._completed_files = 0
         LOGGER.info("Discovered %s files and skipped %s paths.", len(source_files), len(skipped_paths))
@@ -68,8 +72,12 @@ class RepositoryScanner:
         file_results = await asyncio.gather(*tasks)
         research_summary = None
         if self._config.research_enabled:
-            LOGGER.info("Running dependency research enrichment.")
-            research_summary = await asyncio.to_thread(DependencyResearcher(self._config).run, source_files)
+            LOGGER.info("Running post-scan research loop.")
+            research_summary = await PostScanResearcher(self._config).run(
+                client,
+                file_results,
+                self._source_metadata,
+            )
             research_summary.raw_artifact_path = write_research_artifact(run_dir, research_summary)
             research_summary.report_path = write_research_report(run_dir, research_summary)
 
@@ -120,7 +128,23 @@ class RepositoryScanner:
                 file_result.report_path = write_file_report(run_dir, file_result)
                 return file_result
 
-            chunks = chunk_text(text, self._config)
+            try:
+                chunks = await asyncio.to_thread(chunk_text, text, self._config)
+            except TokenizationError as exc:
+                error = f"{source_file.relative_path}: failed to size chunks with the configured tokenizer ({exc})"
+                LOGGER.error(error)
+                errors.append(error)
+                file_result = FileScanResult(
+                    source_file=source_file,
+                    report_path=None,
+                    raw_artifact_path=None,
+                    chunks_scanned=0,
+                    findings=[],
+                    errors=errors,
+                )
+                file_result.raw_artifact_path = write_file_artifact(run_dir, file_result)
+                file_result.report_path = write_file_report(run_dir, file_result)
+                return file_result
             chunk_tasks = [
                 asyncio.create_task(self._scan_chunk(client, source_file, chunk))
                 for chunk in chunks
@@ -170,13 +194,10 @@ class RepositoryScanner:
         chunk,
     ) -> ChunkScanResult:
         messages = build_messages(source_file, chunk, self._config.scan_mode)
-        trace_label = f"{source_file.relative_path} chunk {chunk.chunk_index}/{chunk.total_chunks}"
         async with self._semaphore:
             try:
                 response_text, raw_payload, trace_data = await client.analyze_messages(
                     messages,
-                    trace_label=trace_label,
-                    live_trace_printer=self._live_trace_printer,
                 )
                 parsed = parse_findings(response_text)
                 findings = normalize_findings(source_file, chunk, parsed)
@@ -196,7 +217,7 @@ class RepositoryScanner:
                 return ChunkScanResult(
                     chunk=chunk,
                     findings=[],
-                    raw_response_text=None,
+                    raw_response_text=(response_text if "response_text" in locals() else None),
                     raw_payload=None,
                     trace=_build_failed_trace(messages, self._config),
                     error=error,
@@ -254,6 +275,8 @@ class RepositoryScanner:
             for finding in result.findings:
                 severity_counts[finding.severity.value] += 1
             errors.extend(result.errors)
+        if research_summary is not None:
+            errors.extend(research_summary.errors)
 
         top_files = [item for item in sorted(file_counts, key=lambda item: item[1], reverse=True) if item[1] > 0][:10]
         return RunSummary(
@@ -278,16 +301,44 @@ class RepositoryScanner:
             top_files=top_files,
             errors=errors,
             research_enabled=self._config.research_enabled,
-            total_dependencies_researched=(
-                research_summary.total_dependencies if research_summary is not None else 0
+            research_tool_calls=(len(research_summary.tool_calls) if research_summary is not None else 0),
+            research_search_queries=(len(research_summary.search_queries) if research_summary is not None else 0),
+            research_references_collected=(
+                len(research_summary.references) if research_summary is not None else 0
             ),
-            vulnerable_dependencies=(
-                research_summary.vulnerable_dependencies if research_summary is not None else 0
-            ),
-            searched_dependencies=(
-                research_summary.searched_dependencies if research_summary is not None else 0
+            max_files_limit=self._config.max_files,
+            eligible_files_before_limit=(
+                self._eligible_files_before_limit if self._config.max_files is not None else None
             ),
         )
+
+    def _apply_max_files_limit(
+        self,
+        source_files: list[SourceFile],
+        skipped_paths: list[SkippedPath],
+    ) -> tuple[list[SourceFile], list[SkippedPath]]:
+        max_files = self._config.max_files
+        if max_files is None or len(source_files) <= max_files:
+            return source_files, skipped_paths
+
+        selected_files = random.sample(source_files, max_files)
+        selected_relative_paths = {source_file.relative_path for source_file in selected_files}
+        limited_source_files = sorted(selected_files, key=lambda item: item.relative_path)
+        omitted_files = [
+            source_file for source_file in source_files if source_file.relative_path not in selected_relative_paths
+        ]
+        limited_skips = list(skipped_paths)
+        limited_skips.extend(
+            SkippedPath(relative_path=source_file.relative_path, reason="max_files_limit")
+            for source_file in omitted_files
+        )
+        limited_skips.sort(key=lambda item: item.relative_path)
+        LOGGER.info(
+            "Limiting scan to a random subset of %s file(s) out of %s eligible files.",
+            len(limited_source_files),
+            len(source_files),
+        )
+        return limited_source_files, limited_skips
 
 
 def _build_failed_trace(messages: list[dict[str, str]], config: AppConfig) -> ChunkTraceData | None:
@@ -295,6 +346,4 @@ def _build_failed_trace(messages: list[dict[str, str]], config: AppConfig) -> Ch
         return None
     return ChunkTraceData(
         request_messages=[dict(message) for message in messages],
-        used_streaming=False,
-        live_streaming_requested=config.trace_live_enabled,
     )

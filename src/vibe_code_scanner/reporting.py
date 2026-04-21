@@ -9,7 +9,6 @@ from pathlib import Path
 from .defaults import CATEGORY_DISPLAY_NAMES, SEVERITY_ORDER
 from .models import (
     ChunkScanResult,
-    DependencyResearchItem,
     FileScanResult,
     NormalizedFinding,
     ResearchSummary,
@@ -134,65 +133,60 @@ def write_findings_json(
 
 
 def write_research_artifact(run_dir: Path, research_summary: ResearchSummary) -> Path:
-    path = run_dir / "raw" / "research" / "dependencies.json"
+    path = run_dir / "raw" / "research" / "final-report.json"
     payload = {
-        "total_dependencies": research_summary.total_dependencies,
-        "vulnerable_dependencies": research_summary.vulnerable_dependencies,
-        "searched_dependencies": research_summary.searched_dependencies,
+        "report_markdown": research_summary.report_markdown,
+        "tool_calls": [
+            {
+                "step": call.step,
+                "action": call.action,
+                "argument": call.argument,
+                "result_preview": call.result_preview,
+                "success": call.success,
+            }
+            for call in research_summary.tool_calls
+        ],
+        "references": [
+            {"title": reference.title, "url": reference.url, "snippet": reference.snippet}
+            for reference in research_summary.references
+        ],
+        "files_consulted": research_summary.files_consulted,
+        "search_queries": research_summary.search_queries,
         "errors": research_summary.errors,
-        "dependencies": [_dependency_to_dict(item) for item in research_summary.dependencies],
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 
 def write_research_report(run_dir: Path, research_summary: ResearchSummary) -> Path:
-    path = run_dir / "research" / "dependencies.md"
+    path = run_dir / "research" / "final-report.md"
     lines = [
-        "# Dependency Research",
+        "# Final Research",
         "",
-        f"- Total dependencies researched: `{research_summary.total_dependencies}`",
-        f"- Vulnerable dependencies: `{research_summary.vulnerable_dependencies}`",
-        f"- Dependencies with search results: `{research_summary.searched_dependencies}`",
+        f"- Tool calls: `{len(research_summary.tool_calls)}`",
+        f"- Search queries: `{len(research_summary.search_queries)}`",
+        f"- External references collected: `{len(research_summary.references)}`",
+        f"- Files consulted: `{len(research_summary.files_consulted)}`",
     ]
 
     if research_summary.errors:
         lines.extend(["", "## Errors", ""])
         lines.extend(f"- {error}" for error in research_summary.errors)
 
-    lines.extend(["", "## Dependencies", ""])
-    if not research_summary.dependencies:
-        lines.append("No dependency manifests were parsed for research.")
-    else:
-        for dependency in research_summary.dependencies:
-            lines.extend(
-                [
-                    "",
-                    f"### {dependency.name}",
-                    "",
-                    f"- Source file: `{dependency.source_file}`",
-                    f"- Ecosystem: `{dependency.ecosystem}`",
-                    f"- Declared version: `{dependency.version_spec or 'unversioned'}`",
-                    f"- Exact version used for vulnerability lookup: `{dependency.resolved_version or 'not exact / unavailable'}`",
-                    f"- Latest known version: `{dependency.latest_version or 'unknown'}`",
-                    f"- Vulnerabilities: `{len(dependency.vulnerabilities)}`",
-                ]
-            )
-            if dependency.errors:
-                lines.extend(f"- Research error: {error}" for error in dependency.errors)
-            if dependency.vulnerabilities:
-                lines.extend(["", "#### Known Vulnerabilities", ""])
-                for vulnerability in dependency.vulnerabilities:
-                    lines.append(f"- `{vulnerability.id}`: {vulnerability.summary or 'No summary provided.'}")
-                    if vulnerability.severity:
-                        lines.append(f"  Severity: `{vulnerability.severity}`")
-                    if vulnerability.references:
-                        for reference in vulnerability.references:
-                            lines.append(f"  Reference: [{reference.title}]({reference.url})")
-            if dependency.search_results:
-                lines.extend(["", "#### Search Results", ""])
-                for result in dependency.search_results:
-                    lines.append(f"- [{result.title}]({result.url}): {result.snippet or 'No snippet provided.'}")
+    if research_summary.files_consulted:
+        lines.extend(["", "## Files Consulted", ""])
+        lines.extend(f"- `{file_path}`" for file_path in research_summary.files_consulted)
+
+    if research_summary.search_queries:
+        lines.extend(["", "## Search Queries", ""])
+        lines.extend(f"- `{query}`" for query in research_summary.search_queries)
+
+    if research_summary.references:
+        lines.extend(["", "## External References", ""])
+        for reference in research_summary.references:
+            lines.append(f"- [{reference.title}]({reference.url}): {reference.snippet or 'No snippet provided.'}")
+
+    lines.extend(["", "## Report", "", research_summary.report_markdown.strip() or "No report generated."])
 
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
     return path
@@ -240,15 +234,23 @@ def write_index_markdown(
         ]
     )
 
+    if summary.max_files_limit is not None and summary.eligible_files_before_limit is not None:
+        lines.extend(
+            [
+                f"- Max files limit: `{summary.max_files_limit}`",
+                f"- Eligible files before limit: `{summary.eligible_files_before_limit}`",
+            ]
+        )
+
     if summary.research_enabled:
         lines.extend(
             [
                 "",
-                "## Dependency Research",
+                "## Final Research",
                 "",
-                f"- Dependencies researched: `{summary.total_dependencies_researched}`",
-                f"- Vulnerable dependencies: `{summary.vulnerable_dependencies}`",
-                f"- Dependencies with search results: `{summary.searched_dependencies}`",
+                f"- Research tool calls: `{summary.research_tool_calls}`",
+                f"- Research search queries: `{summary.research_search_queries}`",
+                f"- External references collected: `{summary.research_references_collected}`",
             ]
         )
         if research_summary and research_summary.report_path is not None:
@@ -343,38 +345,6 @@ def _trace_to_dict(trace) -> dict | None:
         return None
     return {
         "request_messages": trace.request_messages,
-        "used_streaming": trace.used_streaming,
-        "live_streaming_requested": trace.live_streaming_requested,
-        "stream_fallback_reason": trace.stream_fallback_reason,
-    }
-
-
-def _dependency_to_dict(dependency: DependencyResearchItem) -> dict:
-    return {
-        "source_file": dependency.source_file,
-        "ecosystem": dependency.ecosystem,
-        "name": dependency.name,
-        "version_spec": dependency.version_spec,
-        "resolved_version": dependency.resolved_version,
-        "latest_version": dependency.latest_version,
-        "vulnerabilities": [
-            {
-                "id": vulnerability.id,
-                "summary": vulnerability.summary,
-                "aliases": vulnerability.aliases,
-                "severity": vulnerability.severity,
-                "references": [
-                    {"title": reference.title, "url": reference.url, "snippet": reference.snippet}
-                    for reference in vulnerability.references
-                ],
-            }
-            for vulnerability in dependency.vulnerabilities
-        ],
-        "search_results": [
-            {"title": reference.title, "url": reference.url, "snippet": reference.snippet}
-            for reference in dependency.search_results
-        ],
-        "errors": dependency.errors,
     }
 
 
@@ -382,11 +352,24 @@ def _research_summary_to_dict(summary: ResearchSummary | None) -> dict | None:
     if summary is None:
         return None
     return {
-        "total_dependencies": summary.total_dependencies,
-        "vulnerable_dependencies": summary.vulnerable_dependencies,
-        "searched_dependencies": summary.searched_dependencies,
+        "report_markdown": summary.report_markdown,
+        "tool_calls": [
+            {
+                "step": call.step,
+                "action": call.action,
+                "argument": call.argument,
+                "result_preview": call.result_preview,
+                "success": call.success,
+            }
+            for call in summary.tool_calls
+        ],
+        "references": [
+            {"title": reference.title, "url": reference.url, "snippet": reference.snippet}
+            for reference in summary.references
+        ],
+        "files_consulted": summary.files_consulted,
+        "search_queries": summary.search_queries,
         "errors": summary.errors,
         "report_path": str(summary.report_path) if summary.report_path else None,
         "raw_artifact_path": str(summary.raw_artifact_path) if summary.raw_artifact_path else None,
-        "dependencies": [_dependency_to_dict(item) for item in summary.dependencies],
     }

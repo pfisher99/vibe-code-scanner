@@ -8,6 +8,7 @@ from vibe_code_scanner.models import (
     CodeChunk,
     ScanMode,
     SourceFile,
+    TokenizerMode,
 )
 from vibe_code_scanner.parser import normalize_findings, parse_findings
 
@@ -30,6 +31,7 @@ def make_config(root: Path) -> AppConfig:
         include_globs=["**/*.py"],
         exclude_globs=[],
         ignored_directories=[],
+        tokenizer_mode=TokenizerMode.HEURISTIC,
     )
 
 
@@ -82,6 +84,64 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(normalized[0].line_start, 4)
         self.assertEqual(normalized[0].line_end, 6)
         self.assertEqual(normalized[0].file_path, "app.py")
+
+    def test_parse_findings_repairs_unquoted_keys_and_trailing_commas(self) -> None:
+        response_text = """{
+  findings: [
+    {
+      "title": "Unsafe deserialization",
+      "category": "security",
+      "severity": "critical",
+      "confidence": "high",
+      "line_start": 8,
+      "line_end": 10,
+      "explanation": "Untrusted input is deserialized directly.",
+      "evidence": "keys.unserialize(req.body)",
+      "remediation": "Use safe parsing and validate input.",
+    }
+  ],
+}"""
+
+        parsed = parse_findings(response_text)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].title, "Unsafe deserialization")
+        self.assertEqual(parsed[0].severity.value, "critical")
+
+    def test_parse_findings_recovers_final_json_object_after_prose(self) -> None:
+        response_text = """The user wants a structured review.
+I notice a parser call with options like {replaceEntities: true} in the prose.
+
+{
+  "findings": [
+    {
+      "title": "XXE risk from entity expansion",
+      "category": "security",
+      "severity": "high",
+      "confidence": "high",
+      "line_start": 14,
+      "line_end": 18,
+      "explanation": "External entities are enabled while parsing XML.",
+      "evidence": "replaceEntities: true",
+      "remediation": "Disable entity expansion and use a hardened XML parser."
+    }
+  ]
+}"""
+
+        parsed = parse_findings(response_text)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].title, "XXE risk from entity expansion")
+
+    def test_parse_findings_ignores_think_block_before_json(self) -> None:
+        response_text = """<think>
+I should inspect the code carefully before returning the object.
+</think>
+{"findings": []}"""
+
+        parsed = parse_findings(response_text)
+
+        self.assertEqual(parsed, [])
 
 
 if __name__ == "__main__":

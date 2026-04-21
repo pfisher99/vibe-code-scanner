@@ -8,13 +8,13 @@ from vibe_code_scanner.models import (
     ApiStyle,
     AppConfig,
     ChunkTraceData,
-    DependencyResearchItem,
-    DependencyVulnerability,
     ResearchReference,
     ResearchSummary,
+    ResearchToolCall,
     ScanMode,
     ScanSourceKind,
     ScanSourceMetadata,
+    TokenizerMode,
 )
 from vibe_code_scanner.scanner import RepositoryScanner
 
@@ -37,6 +37,7 @@ def make_config(root: Path) -> AppConfig:
         include_globs=["**/*.py"],
         exclude_globs=[],
         ignored_directories=[],
+        tokenizer_mode=TokenizerMode.HEURISTIC,
     )
 
 
@@ -122,9 +123,6 @@ class ScannerTests(unittest.TestCase):
                     {"id": "fake-response"},
                     ChunkTraceData(
                         request_messages=messages,
-                        used_streaming=False,
-                        live_streaming_requested=False,
-                        stream_fallback_reason=None,
                     ),
                 )
 
@@ -176,53 +174,78 @@ class ScannerTests(unittest.TestCase):
     def test_repository_scanner_writes_research_outputs_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            (root / "package.json").write_text('{"dependencies":{"express":"4.18.2"}}', encoding="utf-8")
+            (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
             config = make_config(root)
             config.research_enabled = True
 
             async def fake_analyze_messages(_self, _messages, **_kwargs):
-                return ('{"findings":[]}', {"id": "fake-response"}, None)
+                return (
+                    '{"findings":[{"title":"Potential command injection","category":"security",'
+                    '"severity":"high","confidence":"high","line_start":1,"line_end":1,'
+                    '"explanation":"Test finding.","evidence":"shell=True",'
+                    '"remediation":"Avoid shell execution."}]}',
+                    {"id": "fake-response"},
+                    None,
+                )
 
             research_summary = ResearchSummary(
-                dependencies=[
-                    DependencyResearchItem(
-                        source_file="package.json",
-                        ecosystem="npm",
-                        name="express",
-                        version_spec="4.18.2",
-                        resolved_version="4.18.2",
-                        latest_version="5.1.0",
-                        vulnerabilities=[
-                            DependencyVulnerability(
-                                id="GHSA-test",
-                                summary="Known vulnerability",
-                                references=[
-                                    ResearchReference(
-                                        title="OSV Advisory",
-                                        url="https://osv.dev/vulnerability/GHSA-test",
-                                    )
-                                ],
-                            )
-                        ],
+                report_markdown="# Final Research Report\n\nFocus on shell execution first.\n",
+                tool_calls=[
+                    ResearchToolCall(
+                        step=1,
+                        action="list_findings",
+                        argument=None,
+                        result_preview='{"total_findings":1}',
                     )
                 ],
-                total_dependencies=1,
-                vulnerable_dependencies=1,
-                searched_dependencies=0,
+                references=[
+                    ResearchReference(
+                        title="OWASP Command Injection",
+                        url="https://owasp.org/www-community/attacks/Command_Injection",
+                    )
+                ],
+                files_consulted=["app.py"],
+                search_queries=["command injection shell true python"],
             )
 
             with patch(
                 "vibe_code_scanner.client.OpenAICompatibleClient.analyze_messages",
                 new=fake_analyze_messages,
-            ), patch("vibe_code_scanner.scanner.DependencyResearcher.run", return_value=research_summary):
+            ), patch("vibe_code_scanner.scanner.PostScanResearcher.run", return_value=research_summary):
                 summary = asyncio.run(RepositoryScanner(config).run())
 
-            self.assertTrue((summary.run_dir / "research" / "dependencies.md").exists())
-            self.assertTrue((summary.run_dir / "raw" / "research" / "dependencies.json").exists())
+            self.assertTrue((summary.run_dir / "research" / "final-report.md").exists())
+            self.assertTrue((summary.run_dir / "raw" / "research" / "final-report.json").exists())
             self.assertTrue(summary.research_enabled)
-            self.assertEqual(summary.total_dependencies_researched, 1)
+            self.assertEqual(summary.research_tool_calls, 1)
             index_text = (summary.run_dir / "index.md").read_text(encoding="utf-8")
-            self.assertIn("Dependencies researched: `1`", index_text)
+            self.assertIn("Research tool calls: `1`", index_text)
+
+    def test_repository_scanner_can_limit_scan_to_random_subset_of_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(1, 5):
+                (root / f"file_{index}.py").write_text(f"print({index})\n", encoding="utf-8")
+            config = make_config(root)
+            config.max_files = 2
+
+            async def fake_analyze_messages(_self, _messages, **_kwargs):
+                return ('{"findings":[]}', {"id": "fake-response"}, None)
+
+            with patch(
+                "vibe_code_scanner.client.OpenAICompatibleClient.analyze_messages",
+                new=fake_analyze_messages,
+            ):
+                summary = asyncio.run(RepositoryScanner(config).run())
+
+            self.assertEqual(summary.total_files_scanned, 2)
+            self.assertEqual(summary.total_files_skipped, 2)
+            self.assertEqual(summary.max_files_limit, 2)
+            self.assertEqual(summary.eligible_files_before_limit, 4)
+            file_reports = sorted((summary.run_dir / "files").glob("*.md"))
+            self.assertEqual(len(file_reports), 2)
+            index_text = (summary.run_dir / "index.md").read_text(encoding="utf-8")
+            self.assertIn("Max files limit: `2`", index_text)
 
 
 if __name__ == "__main__":
