@@ -173,8 +173,11 @@ If you enable `--research`, the scanner does a second pass over its own output. 
 
 - the aggregated findings
 - per-file reports
+- the original source files for `critical` and `high` findings only
 - optional web search results
 - fetched reference pages
+
+The research prompt is biased to go deeper only on `critical` and `high` issues. It does not reopen original source files for `medium`, `low`, or `info`-only findings.
 
 Built-in web search can use `duckduckgo`. `searxng` is still there too if you want to point it at your own instance.
 

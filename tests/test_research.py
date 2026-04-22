@@ -55,7 +55,9 @@ class ResearchTests(unittest.TestCase):
     def test_post_scan_researcher_runs_tool_loop_over_scan_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            source_path = root / "app.py"
+            source_path.write_text("subprocess.run(user_input, shell=True)\n", encoding="utf-8")
+            source_file = SourceFile(root, source_path, "app.py", 32, "python")
             report_path = root / "app.py.md"
             report_path.write_text("# app.py\n\n## Findings\n\n- shell=True\n", encoding="utf-8")
             file_results = [
@@ -87,6 +89,7 @@ class ResearchTests(unittest.TestCase):
                 [
                     'I will inspect the findings first.\n{"action":"list_findings"}',
                     'The report matters more than speculation.\n{"action":"read_file_report","file_path":"app.py"}',
+                    '{"action":"read_source_file","file_path":"app.py"}',
                     '{"action":"finish","report_markdown":"# Final Research Report\\n\\nInvestigate command execution first."}',
                 ]
             )
@@ -99,7 +102,8 @@ class ResearchTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(summary.tool_calls), 2)
+        self.assertEqual(len(summary.tool_calls), 3)
+        self.assertEqual([call.action for call in summary.tool_calls], ["list_findings", "read_file_report", "read_source_file"])
         self.assertEqual(summary.files_consulted, ["app.py"])
         self.assertIn("Investigate command execution first.", summary.report_markdown)
 
@@ -139,6 +143,96 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(second_section["section_index"], 2)
         self.assertNotEqual(first_section["report_markdown"], second_section["report_markdown"])
 
+    def test_read_source_file_is_paged_and_line_numbered_for_high_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = make_config(root)
+            config.chunk_target_tokens = 40
+            source_path = root / "app.py"
+            source_path.write_text(
+                "\n".join(f"print('line {index}')  # shell=True context" for index in range(1, 21)),
+                encoding="utf-8",
+            )
+            source_file = SourceFile(root, source_path, "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text("# app.py\n", encoding="utf-8")
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[
+                        NormalizedFinding(
+                            file_path="app.py",
+                            chunk_ids=[1],
+                            title="Potential command injection",
+                            category=Category.SECURITY,
+                            severity=Severity.HIGH,
+                            confidence=Confidence.HIGH,
+                            line_start=1,
+                            line_end=1,
+                            explanation="Test finding.",
+                            evidence="shell=True",
+                            remediation="Avoid shell execution.",
+                        )
+                    ],
+                    errors=[],
+                )
+            ]
+
+            researcher = PostScanResearcher(config)
+            first_section = researcher._read_source_file(file_results, "app.py", section_index=1)
+            second_section = researcher._read_source_file(
+                file_results,
+                "app.py",
+                section_index=int(first_section["next_section_index"]),
+            )
+
+        self.assertTrue(first_section["truncated"])
+        self.assertGreater(first_section["total_sections"], 1)
+        self.assertTrue(first_section["source_code"].startswith("1:") or "     1:" in first_section["source_code"])
+        self.assertEqual(first_section["eligible_findings"][0]["severity"], "high")
+        self.assertEqual(second_section["section_index"], 2)
+        self.assertNotEqual(first_section["source_code"], second_section["source_code"])
+
+    def test_read_source_file_rejects_lower_severity_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "app.py"
+            source_path.write_text("print('hello')\n", encoding="utf-8")
+            source_file = SourceFile(root, source_path, "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text("# app.py\n", encoding="utf-8")
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[
+                        NormalizedFinding(
+                            file_path="app.py",
+                            chunk_ids=[1],
+                            title="Weak signal",
+                            category=Category.SECURITY,
+                            severity=Severity.MEDIUM,
+                            confidence=Confidence.MEDIUM,
+                            line_start=1,
+                            line_end=1,
+                            explanation="Test finding.",
+                            evidence="print('hello')",
+                            remediation="Review manually.",
+                        )
+                    ],
+                    errors=[],
+                )
+            ]
+
+            result = PostScanResearcher(make_config(root))._read_source_file(file_results, "app.py")
+
+        self.assertIn("not eligible", result["error"])
+
     def test_post_scan_researcher_can_use_search_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -147,7 +241,9 @@ class ResearchTests(unittest.TestCase):
             config.search_base_url = "http://search.local"
             config.research_max_tokens_per_request = 2048
             config.research_thinking_token_budget = 8192
-            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            source_path = root / "app.py"
+            source_path.write_text("subprocess.run(user_input, shell=True)\n", encoding="utf-8")
+            source_file = SourceFile(root, source_path, "app.py", 32, "python")
             report_path = root / "app.py.md"
             report_path.write_text("# app.py\n", encoding="utf-8")
             file_results = [
@@ -181,6 +277,7 @@ class ResearchTests(unittest.TestCase):
                     '{"action":"read_file_report","file_path":"app.py"}',
                     '{"action":"search_web","query":"python shell true command injection"}',
                     '{"action":"fetch_url","url":"https://owasp.org/example"}',
+                    '{"action":"read_source_file","file_path":"app.py"}',
                     '{"action":"finish","report_markdown":"# Final Research Report\\n\\nDone."}',
                 ]
             )
@@ -225,9 +322,62 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(summary.references), 1)
         self.assertEqual(summary.references[0].title, "OWASP Command Injection")
         self.assertEqual(summary.files_consulted, ["app.py"])
-        self.assertEqual([call.action for call in summary.tool_calls], ["list_findings", "read_file_report", "search_web", "fetch_url"])
+        self.assertEqual(
+            [call.action for call in summary.tool_calls],
+            ["list_findings", "read_file_report", "search_web", "fetch_url", "read_source_file"],
+        )
         self.assertEqual(client.calls[0]["max_tokens_per_request"], 2048)
         self.assertEqual(client.calls[0]["thinking_token_budget"], 8192)
+
+    def test_medium_findings_do_not_require_source_reinspection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "app.py"
+            source_path.write_text("print('hello')\n", encoding="utf-8")
+            source_file = SourceFile(root, source_path, "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text("# app.py\n\n## Findings\n\n- manual review\n", encoding="utf-8")
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[
+                        NormalizedFinding(
+                            file_path="app.py",
+                            chunk_ids=[1],
+                            title="Needs manual review",
+                            category=Category.SECURITY,
+                            severity=Severity.MEDIUM,
+                            confidence=Confidence.MEDIUM,
+                            line_start=1,
+                            line_end=1,
+                            explanation="Test finding.",
+                            evidence="print('hello')",
+                            remediation="Review manually.",
+                        )
+                    ],
+                    errors=[],
+                )
+            ]
+            client = _StubClient(
+                [
+                    '{"action":"list_findings"}',
+                    '{"action":"read_file_report","file_path":"app.py"}',
+                    '{"action":"finish","report_markdown":"# Final Research Report\\n\\nDone."}',
+                ]
+            )
+
+            summary = asyncio.run(
+                PostScanResearcher(make_config(root)).run(
+                    client,
+                    file_results,
+                    ScanSourceMetadata(kind=ScanSourceKind.LOCAL_PATH, label=str(root)),
+                )
+            )
+
+        self.assertEqual([call.action for call in summary.tool_calls], ["list_findings", "read_file_report"])
 
     def test_duckduckgo_search_results_are_parsed_without_extra_service(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -261,8 +411,10 @@ class ResearchTests(unittest.TestCase):
             root = Path(temp_dir)
             config = make_config(root)
             config.trace_enabled = True
-            config.research_max_steps = 3
-            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            config.research_max_steps = 4
+            source_path = root / "app.py"
+            source_path.write_text("subprocess.run(user_input, shell=True)\n", encoding="utf-8")
+            source_file = SourceFile(root, source_path, "app.py", 32, "python")
             report_path = root / "app.py.md"
             report_path.write_text("# app.py\n\n## Findings\n\n- shell=True\n", encoding="utf-8")
             file_results = [
@@ -299,6 +451,7 @@ class ResearchTests(unittest.TestCase):
                 [
                     '{"action":"list_findings"}',
                     '{"action":"read_file_report","file_path":"app.py"}',
+                    '{"action":"read_source_file","file_path":"app.py"}',
                     '{"action":"finish","report_markdown":"# Final Research Report\\n\\nDone."}',
                 ]
             )

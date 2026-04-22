@@ -7,7 +7,7 @@ api_style = "chat_completions"
 tokenizer_mode = "vllm"
 
 # Options: "security", "high_security", or "security_and_quality"
-scan_mode = "security"
+scan_mode = "high_security"
 
 # Qwen3.5 local thinking-mode defaults for precise coding tasks.
 temperature = 0.6

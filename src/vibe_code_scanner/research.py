@@ -32,11 +32,14 @@ from .tracing import TraceRecorder
 
 MAX_FILE_REPORT_CHARS = 12_000
 MAX_FETCH_CONTENT_CHARS = 12_000
+MAX_SOURCE_FILE_CHARS = 12_000
 MAX_RECOMMENDED_FILES = 3
 MAX_RECOMMENDED_SEARCH_QUERIES = 5
 MIN_FILE_REPORTS_BEFORE_FINISH = 2
+MIN_SOURCE_FILE_INSPECTIONS_BEFORE_FINISH = 1
 MIN_WEB_SEARCHES_BEFORE_FINISH = 1
 MIN_FETCHES_BEFORE_FINISH = 1
+SOURCE_REINSPECTION_SEVERITIES = {"critical", "high"}
 TAG_PATTERN = re.compile(r"(?is)<[^>]+>")
 SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?>.*?</\1>")
 WHITESPACE_PATTERN = re.compile(r"\s+")
@@ -70,6 +73,7 @@ class PostScanResearcher:
         ]
         references_by_url: dict[str, ResearchReference] = {}
         files_consulted: set[str] = set()
+        source_files_consulted: set[str] = set()
         search_queries: list[str] = []
         tool_calls: list[ResearchToolCall] = []
         errors: list[str] = []
@@ -154,6 +158,7 @@ class PostScanResearcher:
                 file_results,
                 listed_findings=listed_findings,
                 files_consulted=files_consulted,
+                source_files_consulted=source_files_consulted,
                 references_by_url=references_by_url,
                 successful_searches=successful_searches,
                 fetched_urls=fetched_urls,
@@ -218,6 +223,8 @@ class PostScanResearcher:
                 )
             if consulted_file is not None:
                 files_consulted.add(consulted_file)
+                if action["action"] == "read_source_file":
+                    source_files_consulted.add(consulted_file)
             if search_query is not None:
                 search_queries.append(search_query)
                 if "error" not in tool_result:
@@ -286,6 +293,7 @@ class PostScanResearcher:
         available_tools = [
             '- `list_findings`: list the scanner findings across files',
             '- `read_file_report`: read a specific per-file markdown report by relative file path, with optional `section_index` when paged',
+            '- `read_source_file`: read the original source for a specific file, but only when that file has at least one `critical` or `high` finding',
             '- `fetch_url`: fetch and summarize a public URL, with optional `section_index` when paged',
         ]
         if self._search_is_available():
@@ -298,9 +306,15 @@ class PostScanResearcher:
         ) or "- none"
         top_files_block = "\n".join(file_lines[:20]) or "- no files with findings"
         recommended_files = self._recommended_file_paths(file_results)
+        source_reinspection_candidates = self._source_reinspection_candidates(file_results)
         recommended_queries = self._suggest_search_queries(file_results)
         recommended_files_block = (
             "\n".join(f"- {file_path}" for file_path in recommended_files) if recommended_files else "- none"
+        )
+        source_reinspection_block = (
+            "\n".join(f"- {file_path}" for file_path in source_reinspection_candidates)
+            if source_reinspection_candidates
+            else "- none"
         )
         recommended_queries_block = (
             "\n".join(f"- {query}" for query in recommended_queries) if recommended_queries else "- none"
@@ -310,23 +324,38 @@ class PostScanResearcher:
             sum(1 for result in file_results if result.findings),
         )
         search_is_available = self._search_is_available()
-        required_steps = [
-            "1. Call `list_findings` first.",
-            f"2. Read at least `{required_file_reports}` per-file report(s) for the highest-risk files before finishing.",
-        ]
+        required_steps: list[str] = []
+        step_number = 1
+        required_steps.append(f"{step_number}. Call `list_findings` first.")
+        step_number += 1
+        required_steps.append(
+            f"{step_number}. Read at least `{required_file_reports}` per-file report(s) for the highest-risk files before finishing."
+        )
+        step_number += 1
+        if source_reinspection_candidates:
+            required_steps.append(
+                f"{step_number}. Because this run includes `critical` or `high` findings, use `read_source_file` on at least one eligible file before finishing."
+            )
+            step_number += 1
+        else:
+            required_steps.append(
+                f"{step_number}. Do not reopen original source files in this run; the remaining findings are `medium`, `low`, or `info` only."
+            )
+            step_number += 1
         if search_is_available:
             required_steps.append(
-                "3. Because web search is available, perform at least one `search_web` lookup and `fetch_url` one authoritative result before finishing."
+                f"{step_number}. Because web search is available, perform at least one `search_web` lookup and `fetch_url` one authoritative result before finishing."
             )
+            step_number += 1
             required_steps.append(
-                "4. Prefer authoritative sources such as OWASP, NVD, vendor/framework docs, MDN, or official package advisories."
+                f"{step_number}. Prefer authoritative sources such as OWASP, NVD, vendor/framework docs, MDN, or official package advisories."
             )
         else:
-            required_steps.append("3. Web search is unavailable in this run, so rely only on scanner outputs.")
+            required_steps.append(f"{step_number}. Web search is unavailable in this run, so rely only on scanner outputs.")
 
         return f"""Completed scan source: {source_metadata.label}
 Research goal: perform a final deep research pass over the scanner's own output.
-The initial scan was completed without tools. In this phase you may inspect scan outputs and optionally use web tools before writing a final report.
+The initial scan was completed without tools. In this phase you may inspect scan outputs, reopen original source for `critical` or `high` findings, and optionally use web tools before writing a final report.
 
 Summary:
 - Total files with findings: {sum(1 for result in file_results if result.findings)}
@@ -346,6 +375,9 @@ Required workflow:
 Recommended file reports:
 {recommended_files_block}
 
+Recommended source reinspection files:
+{source_reinspection_block}
+
 Recommended search queries:
 {recommended_queries_block}
 
@@ -355,6 +387,7 @@ Final report rules:
 - Separate well-supported findings from uncertain or contextual ones.
 - Make the final report useful to a human reviewer, not just a restatement of the raw findings.
 - Tool results may be paged to stay within the request token budget. If a result says `truncated: true` and provides `next_section_index`, call the same tool again with that `section_index` if you need more context.
+- Only use `read_source_file` for files with `critical` or `high` findings. Prefer the recommended source reinspection files first, and do not reopen source for `medium`, `low`, or `info`-only findings.
 - Use web search to answer concrete questions: is this a real vulnerability pattern, what is the common impact, what is the official remediation, and for dependency issues what advisory or latest-version guidance exists.
 
 When you are ready, return a `finish` action with a complete markdown report."""
@@ -371,6 +404,12 @@ When you are ready, return a `finish` action with a complete markdown report."""
             file_path = str(action.get("file_path", "")).strip()
             section_index = self._parse_section_index(action.get("section_index", 1))
             result = self._read_file_report(file_results, file_path, section_index=section_index)
+            consulted_file = file_path if "error" not in result else None
+            return result, file_path or None, [], consulted_file, None
+        if action_name == "read_source_file":
+            file_path = str(action.get("file_path", "")).strip()
+            section_index = self._parse_section_index(action.get("section_index", 1))
+            result = self._read_source_file(file_results, file_path, section_index=section_index)
             consulted_file = file_path if "error" not in result else None
             return result, file_path or None, [], consulted_file, None
         if action_name == "search_web":
@@ -442,6 +481,7 @@ When you are ready, return a `finish` action with a complete markdown report."""
             "findings_by_severity": severity_counts,
             "files": files[:25],
             "suggested_file_reports": self._recommended_file_paths(file_results),
+            "suggested_source_files": self._source_reinspection_candidates(file_results),
             "suggested_search_queries": self._suggest_search_queries(file_results),
         }
 
@@ -475,6 +515,55 @@ When you are ready, return a `finish` action with a complete markdown report."""
                     "truncated": len(sections) > 1,
                     "next_section_index": (section_index + 1 if section_index < len(sections) else None),
                 }
+        return {"error": f"Unknown file path '{file_path}'."}
+
+    def _read_source_file(
+        self,
+        file_results: list[FileScanResult],
+        file_path: str,
+        *,
+        section_index: int = 1,
+    ) -> dict[str, Any]:
+        if not file_path:
+            return {"error": "file_path is required for read_source_file."}
+        for result in file_results:
+            if result.source_file.relative_path != file_path:
+                continue
+            if not self._eligible_for_source_reinspection(result):
+                return {
+                    "error": (
+                        f"{file_path} is not eligible for read_source_file because it has no "
+                        "`critical` or `high` findings."
+                    )
+                }
+            if not result.source_file.path.exists():
+                return {"error": f"Source file {file_path} could not be found on disk."}
+            source_text = result.source_file.path.read_text(encoding="utf-8", errors="replace")
+            numbered_source = self._add_line_numbers(source_text)
+            sections = self._paginate_text(numbered_source, self._tool_section_token_budget())
+            if section_index > len(sections):
+                return {
+                    "error": (
+                        f"section_index {section_index} is out of range for {file_path};"
+                        f" available sections: 1-{len(sections)}."
+                    )
+                }
+            return {
+                "file_path": file_path,
+                "section_index": section_index,
+                "total_sections": len(sections),
+                "source_code": _truncate(sections[section_index - 1], MAX_SOURCE_FILE_CHARS),
+                "truncated": len(sections) > 1,
+                "next_section_index": (section_index + 1 if section_index < len(sections) else None),
+                "eligible_findings": [
+                    {
+                        "title": finding.title,
+                        "severity": finding.severity.value,
+                        "lines": _format_line_range(finding.line_start, finding.line_end),
+                    }
+                    for finding in self._source_reinspection_findings(result)[:5]
+                ],
+            }
         return {"error": f"Unknown file path '{file_path}'."}
 
     async def _search_web(self, query: str) -> dict[str, Any]:
@@ -652,6 +741,7 @@ When you are ready, return a `finish` action with a complete markdown report."""
         *,
         listed_findings: bool,
         files_consulted: set[str],
+        source_files_consulted: set[str],
         references_by_url: dict[str, ResearchReference],
         successful_searches: int,
         fetched_urls: set[str],
@@ -662,6 +752,26 @@ When you are ready, return a `finish` action with a complete markdown report."""
                 "Do not skip the scanner overview. Call `list_findings` first so you have the exact counts,"
                 " top files, and suggested next targets.\n"
                 'Return JSON only, for example: {"action":"list_findings"}'
+            )
+        if action_name == "read_source_file":
+            source_candidates = self._source_reinspection_candidates(file_results)
+            requested_file_path = str(action.get("file_path", "")).strip()
+            if requested_file_path and self._file_is_source_reinspection_eligible(file_results, requested_file_path):
+                return None
+            if source_candidates:
+                return (
+                    "Use `read_source_file` only for files with `critical` or `high` findings."
+                    " Do not reopen source for lower-severity-only files.\n"
+                    f'Return JSON only, for example: {{"action":"read_source_file","file_path":"{source_candidates[0]}"}}'
+                )
+            next_file = next(
+                (result.source_file.relative_path for result in file_results if result.findings),
+                "relative/path",
+            )
+            return (
+                "Do not reopen original source files in this run. There are no `critical` or `high` findings,"
+                " so keep the research pass focused on existing findings, file reports, and optional web validation.\n"
+                f'Return JSON only, for example: {{"action":"read_file_report","file_path":"{next_file}"}}'
             )
         if action_name != "finish":
             return None
@@ -693,6 +803,25 @@ When you are ready, return a `finish` action with a complete markdown report."""
                 "Do not finish yet. Read more of the actual scanner outputs first."
                 f" You have only consulted `{len(files_consulted)}` file report(s), and this run requires"
                 f" at least `{required_file_reports}` before finishing.\n"
+                f"Return JSON only, for example: {example}"
+            )
+
+        source_candidates = self._source_reinspection_candidates(file_results)
+        required_source_file_inspections = min(
+            MIN_SOURCE_FILE_INSPECTIONS_BEFORE_FINISH,
+            len(source_candidates),
+        )
+        if len(source_files_consulted) < required_source_file_inspections:
+            next_file = next((file_path for file_path in source_candidates if file_path not in source_files_consulted), None)
+            example = (
+                f'{{"action":"read_source_file","file_path":"{next_file}"}}'
+                if next_file
+                else '{"action":"read_source_file","file_path":"relative/path"}'
+            )
+            return (
+                "Do not finish yet. This run includes `critical` or `high` findings, so inspect the original"
+                " source for at least one eligible file before finishing."
+                " Do not spend that deeper inspection on `medium`, `low`, or `info`-only files.\n"
                 f"Return JSON only, for example: {example}"
             )
 
@@ -731,6 +860,37 @@ When you are ready, return a `finish` action with a complete markdown report."""
             ),
         )
         return [result.source_file.relative_path for result in ranked[:MAX_RECOMMENDED_FILES]]
+
+    def _source_reinspection_candidates(self, file_results: list[FileScanResult]) -> list[str]:
+        ranked = sorted(
+            (result for result in file_results if self._eligible_for_source_reinspection(result)),
+            key=lambda item: (
+                self._best_severity_rank(item),
+                -len(self._source_reinspection_findings(item)),
+                item.source_file.relative_path,
+            ),
+        )
+        return [result.source_file.relative_path for result in ranked[:MAX_RECOMMENDED_FILES]]
+
+    def _eligible_for_source_reinspection(self, result: FileScanResult) -> bool:
+        return bool(self._source_reinspection_findings(result))
+
+    def _file_is_source_reinspection_eligible(
+        self,
+        file_results: list[FileScanResult],
+        file_path: str,
+    ) -> bool:
+        for result in file_results:
+            if result.source_file.relative_path == file_path:
+                return self._eligible_for_source_reinspection(result)
+        return False
+
+    def _source_reinspection_findings(self, result: FileScanResult) -> list[Any]:
+        return [
+            finding
+            for finding in result.findings
+            if finding.severity.value in SOURCE_REINSPECTION_SEVERITIES
+        ]
 
     def _suggest_search_queries(self, file_results: list[FileScanResult]) -> list[str]:
         queries: list[str] = []
@@ -819,6 +979,12 @@ When you are ready, return a `finish` action with a complete markdown report."""
         if not chunks:
             return [stripped]
         return [chunk.text.strip() for chunk in chunks if chunk.text.strip()]
+
+    def _add_line_numbers(self, text: str) -> str:
+        lines = text.splitlines()
+        if not lines:
+            return ""
+        return "\n".join(f"{index:>6}: {line}" for index, line in enumerate(lines, start=1))
 
     def _wrap_text_for_chunking(self, text: str) -> str:
         wrapped_lines: list[str] = []

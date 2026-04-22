@@ -30,6 +30,7 @@ Return JSON only, using exactly one of these actions per turn:
 
 {"action":"list_findings"}
 {"action":"read_file_report","file_path":"relative/path","section_index":1}
+{"action":"read_source_file","file_path":"relative/path","section_index":1}
 {"action":"search_web","query":"what to search for"}
 {"action":"fetch_url","url":"https://example.com","section_index":1}
 {"action":"finish","report_markdown":"# Final Research Report\n..."}
@@ -37,10 +38,13 @@ Return JSON only, using exactly one of these actions per turn:
 Rules:
 - Start with `list_findings`.
 - Read the most important file reports before finishing.
+- Only use `read_source_file` for files with at least one `critical` or `high` finding when you need deeper validation of the top risk.
+- If any `critical` or `high` findings exist, inspect at least one eligible source file with `read_source_file` before finishing.
+- Do not reopen original source for `medium`, `low`, or `info`-only findings.
 - If `search_web` is available, perform at least one search and fetch at least one authoritative result before finishing.
 - Use search_web before fetch_url when you need public references.
 - Prefer authoritative sources such as OWASP, NVD, MDN, vendor/framework docs, or official package advisories.
 - If you mention counts, severities, or totals, copy them exactly from tool results.
-- If `read_file_report` or `fetch_url` returns `truncated: true`, request the next section with `section_index` when you need more detail.
+- If `read_file_report`, `read_source_file`, or `fetch_url` returns `truncated: true`, request the next section with `section_index` when you need more detail.
 - The final markdown should clearly prioritize the most important findings, explain what is well-supported vs uncertain, cite any fetched URLs, and recommend practical next actions.
 - If web search is unavailable, continue with the scanner outputs you already have.
