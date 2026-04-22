@@ -11,7 +11,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from .config import ConfigError, load_app_config
-from .models import ScanSourceKind, ScanSourceMetadata
+from .models import AppConfig, ScanSourceKind, ScanSourceMetadata
 from .repo_source import RepoAcquisitionError, acquire_github_repo
 from .scanner import RepositoryScanner
 
@@ -21,6 +21,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("root", nargs="?", help="Repository root to scan. Overrides config root_path.")
     parser.add_argument("--repo", help="Public GitHub repository URL to clone and scan.")
     parser.add_argument("--ref", help="Optional branch or tag to check out when using --repo.")
+    parser.add_argument(
+        "--folder",
+        "--start-folder",
+        dest="start_folder",
+        help="Optional subfolder under the selected local root or cloned repo to scan.",
+    )
     parser.add_argument("--config", help="Path to a TOML config file.")
     parser.add_argument("--output", help="Export directory override.")
     parser.add_argument("--base-url", help="OpenAI-compatible endpoint root override.")
@@ -54,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scan-mode",
-        choices=["security", "security_and_quality"],
+        choices=["security", "high_security", "security_and_quality"],
         help="Scan mode override.",
     )
     parser.add_argument(
@@ -112,18 +118,22 @@ def main(argv: list[str] | None = None) -> int:
                 "max_concurrent_requests": args.max_concurrency,
                 "max_files": args.max_files,
             }
-
-            try:
-                config = load_app_config(config_path, overrides)
-            except ConfigError as exc:
-                print(f"Configuration error: {exc}", file=sys.stderr)
-                return 2
+            config = load_app_config(config_path, overrides)
+            source_metadata = _finalize_local_scan_source(
+                config,
+                source_metadata,
+                args.start_folder,
+                root_override,
+            )
 
             try:
                 summary = asyncio.run(RepositoryScanner(config, source_metadata=source_metadata).run())
             except KeyboardInterrupt:
                 print("Scan cancelled.", file=sys.stderr)
                 return 130
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
     except RepoAcquisitionError as exc:
         print(f"Repository error: {exc}", file=sys.stderr)
         return 2
@@ -148,8 +158,13 @@ def _resolve_scan_source(args: argparse.Namespace, temp_repo_dir: Path | None) -
         if temp_repo_dir is None:
             raise RepoAcquisitionError("A temporary working directory was not created for the repository clone.")
         acquired_repo = acquire_github_repo(args.repo, temp_repo_dir, ref=args.ref)
+        scan_root = _resolve_start_folder(
+            acquired_repo.checkout_path,
+            args.start_folder,
+            flag_name="--folder/--start-folder",
+        )
         return (
-            str(acquired_repo.checkout_path.resolve()),
+            str(scan_root),
             ScanSourceMetadata(
                 kind=ScanSourceKind.GITHUB_REPO,
                 label=acquired_repo.normalized_repo_url,
@@ -159,9 +174,56 @@ def _resolve_scan_source(args: argparse.Namespace, temp_repo_dir: Path | None) -
             ),
         )
 
-    root_path = str(Path(args.root).expanduser().resolve()) if args.root else None
+    base_root = Path(args.root).expanduser().resolve() if args.root else None
+    resolved_root = (
+        _resolve_start_folder(base_root, args.start_folder, flag_name="--folder/--start-folder")
+        if base_root is not None
+        else None
+    )
+    root_path = str(resolved_root) if resolved_root is not None else None
     label = root_path or "config root_path"
     return root_path, ScanSourceMetadata(kind=ScanSourceKind.LOCAL_PATH, label=label)
+
+
+def _resolve_start_folder(base_root: Path, start_folder: str | None, *, flag_name: str) -> Path:
+    if start_folder is None:
+        return base_root.resolve()
+
+    subdir = Path(start_folder).expanduser()
+    if subdir.is_absolute():
+        raise ConfigError(f"{flag_name} must be a relative path inside the selected scan source.")
+
+    resolved_base = base_root.resolve()
+    candidate = (resolved_base / subdir).resolve()
+    try:
+        candidate.relative_to(resolved_base)
+    except ValueError as exc:
+        raise ConfigError(f"{flag_name} must stay within the selected scan source.") from exc
+    if not candidate.exists():
+        raise ConfigError(f"Requested scan folder does not exist: {candidate}")
+    if not candidate.is_dir():
+        raise ConfigError(f"Requested scan folder must be a directory: {candidate}")
+    return candidate
+
+
+def _finalize_local_scan_source(
+    config: AppConfig,
+    source_metadata: ScanSourceMetadata,
+    start_folder: str | None,
+    root_override: str | None,
+) -> ScanSourceMetadata:
+    if source_metadata.kind != ScanSourceKind.LOCAL_PATH:
+        return source_metadata
+    if start_folder is None or root_override is not None:
+        return source_metadata
+
+    resolved_root = _resolve_start_folder(
+        config.root_path,
+        start_folder,
+        flag_name="--folder/--start-folder",
+    )
+    config.root_path = resolved_root
+    return ScanSourceMetadata(kind=ScanSourceKind.LOCAL_PATH, label=str(resolved_root))
 
 
 def _configure_logging(level: str) -> None:

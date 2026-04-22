@@ -30,7 +30,6 @@ from .parser import ResponseParseError, load_json_object
 from .tokenization import build_token_counter
 from .tracing import TraceRecorder
 
-MAX_RESEARCH_STEPS = 8
 MAX_FILE_REPORT_CHARS = 12_000
 MAX_FETCH_CONTENT_CHARS = 12_000
 MAX_RECOMMENDED_FILES = 3
@@ -77,18 +76,38 @@ class PostScanResearcher:
         listed_findings = False
         successful_searches = 0
         fetched_urls: set[str] = set()
+        max_steps = self._config.research_max_steps
 
-        for step in range(1, MAX_RESEARCH_STEPS + 1):
-            trace_label = f"research step {step}/{MAX_RESEARCH_STEPS}"
+        for step in range(1, max_steps + 1):
+            trace_label = f"research step {step}/{max_steps}"
+            slot_id: int | None = None
             if trace_recorder is not None:
                 await trace_recorder.record("research_step_started", label=trace_label, step_index=step)
             try:
-                response_text, _raw_payload, _trace = await client.analyze_messages(
+                if trace_recorder is not None:
+                    slot_id = await trace_recorder.acquire_slot(trace_label)
+                    await trace_recorder.record(
+                        "research_request_started",
+                        label=trace_label,
+                        step_index=step,
+                        slot_id=slot_id,
+                    )
+                response_text, _raw_payload, trace_data = await client.analyze_messages(
                     messages,
                     trace_label=trace_label,
+                    slot_id=slot_id,
                     max_tokens_per_request=self._config.effective_research_max_tokens_per_request(),
                     thinking_token_budget=self._config.effective_research_thinking_token_budget(),
                 )
+                if trace_recorder is not None:
+                    await trace_recorder.record(
+                        "research_request_completed",
+                        label=trace_label,
+                        step_index=step,
+                        slot_id=slot_id,
+                        status="ok",
+                        duration_ms=(trace_data.duration_ms if trace_data is not None else None),
+                    )
             except ModelClientError as exc:
                 errors.append(f"Research step {step} failed: {exc}")
                 if trace_recorder is not None:
@@ -96,9 +115,13 @@ class PostScanResearcher:
                         "research_step_failed",
                         label=trace_label,
                         step_index=step,
+                        slot_id=slot_id,
                         error=str(exc),
                     )
                 break
+            finally:
+                if trace_recorder is not None:
+                    await trace_recorder.release_slot(slot_id, trace_label)
 
             try:
                 action = _parse_action_response(response_text)
@@ -113,6 +136,7 @@ class PostScanResearcher:
                         "research_step_failed",
                         label=trace_label,
                         step_index=step,
+                        slot_id=slot_id,
                         error=str(exc),
                     )
                 break
@@ -121,6 +145,7 @@ class PostScanResearcher:
                     "research_action_parsed",
                     label=trace_label,
                     step_index=step,
+                    slot_id=slot_id,
                     action=action["action"],
                 )
 
@@ -139,6 +164,7 @@ class PostScanResearcher:
                         "research_feedback_injected",
                         label=trace_label,
                         step_index=step,
+                        slot_id=slot_id,
                         action=action["action"],
                     )
                 messages.append({"role": "assistant", "content": response_text})
@@ -154,6 +180,7 @@ class PostScanResearcher:
                             "research_step_failed",
                             label=trace_label,
                             step_index=step,
+                            slot_id=slot_id,
                             error="finish action missing report_markdown",
                         )
                     break
@@ -162,6 +189,7 @@ class PostScanResearcher:
                         "research_finished",
                         label=trace_label,
                         step_index=step,
+                        slot_id=slot_id,
                         status="ok",
                     )
                 return ResearchSummary(
@@ -182,6 +210,7 @@ class PostScanResearcher:
                     "research_tool_executed",
                     label=trace_label,
                     step_index=step,
+                    slot_id=slot_id,
                     action=action["action"],
                     query=search_query,
                     url=(tool_argument if action["action"] == "fetch_url" else None),
@@ -770,7 +799,7 @@ When you are ready, return a `finish` action with a complete markdown report."""
         return True
 
     def _tool_section_token_budget(self) -> int:
-        return max(1, (self._config.chunk_target_tokens * 3 // 4) // MAX_RESEARCH_STEPS)
+        return max(1, (self._config.chunk_target_tokens * 3 // 4) // self._config.research_max_steps)
 
     def _paginate_text(self, text: str, token_budget: int) -> list[str]:
         stripped = text.strip()

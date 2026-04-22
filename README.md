@@ -47,6 +47,13 @@ Scan a public GitHub repo:
 vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --ref master --config scanner.example.toml --scan-mode security --max-concurrency 4
 ```
 
+Scan only a subfolder under a local repo or cloned GitHub repo:
+
+```bash
+vibe-code-scanner ../some-repo --folder src/server --config scanner.example.toml
+vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --folder app --config scanner.example.toml
+```
+
 Turn on trace/debug output:
 
 ```bash
@@ -108,7 +115,7 @@ The ones that matter most:
 - `base_url`: where your local OpenAI-compatible endpoint lives
 - `model_name`: model id sent to the endpoint
 - `tokenizer_mode`: `vllm`, `auto`, or `heuristic`
-- `scan_mode`: `security` or `security_and_quality`
+- `scan_mode`: `security`, `high_security`, or `security_and_quality`
 - `max_concurrent_requests`: how many requests stay in flight
 - `max_tokens_per_request`: output token cap for normal scan mode
 - `chunk_target_tokens`: input chunk size target
@@ -116,6 +123,7 @@ The ones that matter most:
 - `thinking_token_budget_enabled`: whether to send `extra_body.thinking_token_budget`
 - `thinking_token_budget`: normal scan reasoning budget
 - `research`: whether to run the final research pass
+- `research_max_steps`: how many tool/action turns the research loop gets before it falls back
 - `research_max_tokens_per_request`: research-only output cap
 - `research_thinking_token_budget`: research-only reasoning budget
 - `max_context_max_tokens_per_request`: alternate output budget used by `--max-context`
@@ -169,6 +177,7 @@ It does three things:
 - prints step-by-step trace lines in the terminal
 - tracks which concurrent request slot is doing what
 - stores richer trace metadata in chunk artifacts and `raw/trace/events.jsonl`
+- includes the research loop too, so you can see research step starts, model requests, parsed actions, tool executions, and whether it finished or fell back
 
 So if a run feels stuck, weird, or noisy, this is the mode you want.
 
@@ -187,26 +196,30 @@ Right now the built-in no-extra-dependency search path is `duckduckgo`. `searxng
 
 Research is useful, but it is still very much “AI doing AI things,” so treat it like a second-pass assistant, not ground truth.
 
+If the research pass keeps doing useful work but never quite gets to the final write-up, bump `research_max_steps` in config.
+
 ## A Few Honest Notes
 
 - This is for fun. It is not a substitute for a real security review.
 - Small local models will still hallucinate, drift, or output garbage sometimes.
 - The scanner tries hard to force strict JSON and recover from messy outputs, but the model can still be annoying.
 - `thinking_token_budget` is not standard OpenAI API behavior. It only works when the endpoint supports it.
+- `research_max_steps` is configurable now. The sample config uses `12`, which gives the model more room for file reads, searches, fetches, and then actually finishing.
 - `--repo` is public GitHub only right now and depends on `git` being installed.
 - The built-in web search path is intentionally simple.
 - Broad file scanning is a tradeoff. The sample config is tuned to avoid a bunch of low-value junk.
+- Trace mode includes the research loop too, so `raw/trace/events.jsonl` will show research steps, parsed actions, tool executions, and whether the loop finished cleanly or fell back.
 
 ## CLI
 
 ```text
 usage: vibe-code-scanner [-h] [--config CONFIG] [--output OUTPUT]
-                         [--repo REPO] [--ref REF]
+                         [--repo REPO] [--ref REF] [--folder START_FOLDER]
                          [--base-url BASE_URL] [--model MODEL]
                          [--max-context] [--trace]
                          [--research] [--search-backend {none,searxng,duckduckgo}]
                          [--search-base-url SEARCH_BASE_URL]
-                         [--scan-mode {security,security_and_quality}]
+                         [--scan-mode {security,high_security,security_and_quality}]
                          [--api-style {chat_completions,responses}]
                          [--max-concurrency MAX_CONCURRENCY]
                          [--max-files MAX_FILES]

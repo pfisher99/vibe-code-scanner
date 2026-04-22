@@ -35,3 +35,31 @@ class PromptingTests(unittest.TestCase):
         self.assertIn("Do not emit <think> tags", messages[0]["content"])
         self.assertIn("Return one JSON object only.", messages[1]["content"])
         self.assertIn('prefer {"findings": []}', messages[1]["content"])
+
+    def test_build_messages_adds_strict_high_security_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_file = SourceFile(
+                root_path=root,
+                path=root / "app.py",
+                relative_path="app.py",
+                size_bytes=32,
+                language_hint="python",
+            )
+            chunk = CodeChunk(
+                chunk_index=1,
+                total_chunks=1,
+                start_line=1,
+                end_line=2,
+                text="print('hello')\n",
+                estimated_tokens=4,
+                overlap_from_previous_tokens=0,
+                overlap_from_previous_lines=0,
+            )
+
+            messages = build_messages(source_file, chunk, scan_mode=ScanMode.HIGH_SECURITY)
+
+        self.assertIn("Scan mode: high_security", messages[1]["content"])
+        self.assertIn("only `security` findings", messages[1]["content"])
+        self.assertIn("only `high` or `critical` severity findings", messages[1]["content"])
+        self.assertIn("dangerous security vulnerabilities with serious exploit potential", messages[1]["content"])

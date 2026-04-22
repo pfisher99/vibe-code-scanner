@@ -18,7 +18,9 @@ from .models import (
     ChunkScanResult,
     ChunkTraceData,
     FileScanResult,
+    NormalizedFinding,
     RunSummary,
+    ScanMode,
     ScanSourceKind,
     ScanSourceMetadata,
     SkippedPath,
@@ -288,6 +290,7 @@ class RepositoryScanner:
                     )
                 parsed = parse_findings(response_text)
                 findings = normalize_findings(source_file, chunk, parsed)
+                findings = _filter_findings_for_mode(findings, self._config.scan_mode)
                 if trace_data is not None:
                     append_trace_step(
                         trace_data,
@@ -504,3 +507,16 @@ def _build_failed_trace(
         request_message_count=len(messages),
         request_char_count=sum(len(str(message.get("content", ""))) for message in messages),
     )
+
+
+def _filter_findings_for_mode(
+    findings: list[NormalizedFinding],
+    scan_mode: ScanMode,
+) -> list[NormalizedFinding]:
+    if scan_mode != ScanMode.HIGH_SECURITY:
+        return findings
+    return [
+        finding
+        for finding in findings
+        if finding.category.value == "security" and finding.severity.value in {"critical", "high"}
+    ]

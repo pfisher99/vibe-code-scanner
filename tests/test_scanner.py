@@ -233,6 +233,41 @@ class ScannerTests(unittest.TestCase):
             index_text = (summary.run_dir / "index.md").read_text(encoding="utf-8")
             self.assertIn("Research tool calls: `1`", index_text)
 
+    def test_high_security_mode_filters_out_non_security_and_lower_severity_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            config = make_config(root)
+            config.scan_mode = ScanMode.HIGH_SECURITY
+
+            async def fake_analyze_messages(_self, _messages, **_kwargs):
+                return (
+                    '{"findings":['
+                    '{"title":"Critical RCE","category":"security","severity":"critical","confidence":"high","line_start":1,"line_end":1,'
+                    '"explanation":"Critical exploit.","evidence":"exec(user_input)","remediation":"Remove direct execution."},'
+                    '{"title":"Medium SQLi concern","category":"security","severity":"medium","confidence":"high","line_start":1,"line_end":1,'
+                    '"explanation":"Needs more work.","evidence":"query string building","remediation":"Use parameters."},'
+                    '{"title":"Correctness issue","category":"correctness","severity":"high","confidence":"high","line_start":1,"line_end":1,'
+                    '"explanation":"Bug.","evidence":"wrong branch","remediation":"Fix logic."}'
+                    ']}',
+                    {"id": "fake-response"},
+                    None,
+                )
+
+            with patch(
+                "vibe_code_scanner.client.OpenAICompatibleClient.analyze_messages",
+                new=fake_analyze_messages,
+            ):
+                summary = asyncio.run(RepositoryScanner(config).run())
+
+            self.assertEqual(summary.findings_by_severity.get("critical"), 1)
+            self.assertIsNone(summary.findings_by_severity.get("high"))
+            self.assertIsNone(summary.findings_by_severity.get("medium"))
+            file_report = (summary.run_dir / "files" / "app.py.md").read_text(encoding="utf-8")
+            self.assertIn("Critical RCE", file_report)
+            self.assertNotIn("Medium SQLi concern", file_report)
+            self.assertNotIn("Correctness issue", file_report)
+
     def test_repository_scanner_can_limit_scan_to_random_subset_of_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

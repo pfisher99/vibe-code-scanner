@@ -10,6 +10,7 @@ from pathlib import Path
 
 class ScanMode(StrEnum):
     SECURITY = "security"
+    HIGH_SECURITY = "high_security"
     SECURITY_AND_QUALITY = "security_and_quality"
 
 
@@ -92,6 +93,7 @@ class AppConfig:
     thinking_token_budget: int = 4096
     research_max_tokens_per_request: int | None = None
     research_thinking_token_budget: int | None = None
+    research_max_steps: int = 12
     max_files: int | None = None
 
     def effective_research_max_tokens_per_request(self) -> int:

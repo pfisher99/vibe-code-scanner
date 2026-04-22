@@ -25,6 +25,7 @@ from .defaults import (
     DEFAULT_PRESENCE_PENALTY,
     DEFAULT_REPETITION_PENALTY,
     DEFAULT_RESEARCH_MAX_RESULTS,
+    DEFAULT_RESEARCH_MAX_STEPS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_RETRY_COUNT,
     DEFAULT_TEMPERATURE,
@@ -119,6 +120,10 @@ def build_config(raw: Mapping[str, Any]) -> AppConfig:
         research_max_results=_positive_int(
             _get(normalized_raw, "research_max_results", DEFAULT_RESEARCH_MAX_RESULTS),
             "research_max_results",
+        ),
+        research_max_steps=_positive_int(
+            _get(normalized_raw, "research_max_steps", DEFAULT_RESEARCH_MAX_STEPS),
+            "research_max_steps",
         ),
         tokenizer_mode=_parse_tokenizer_mode(_get(normalized_raw, "tokenizer_mode", DEFAULT_TOKENIZER_MODE)),
         temperature=_non_negative_float(_get(normalized_raw, "temperature", DEFAULT_TEMPERATURE), "temperature"),
@@ -290,6 +295,8 @@ def _parse_scan_mode(value: Any) -> ScanMode:
     aliases = {
         "security": ScanMode.SECURITY,
         "security_only": ScanMode.SECURITY,
+        "high_security": ScanMode.HIGH_SECURITY,
+        "critical_security": ScanMode.HIGH_SECURITY,
         "both": ScanMode.SECURITY_AND_QUALITY,
         "security_and_quality": ScanMode.SECURITY_AND_QUALITY,
     }

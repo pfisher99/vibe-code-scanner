@@ -80,6 +80,12 @@ Important response rules:
 - Do not include explanatory text before or after the JSON object.
 - If the chunk looks safe or uncertain, prefer {"findings": []} over a weak claim."""
 
+    if scan_mode == ScanMode.HIGH_SECURITY:
+        user_prompt += """
+- In high_security mode, report only `security` findings.
+- In high_security mode, report only `high` or `critical` severity findings.
+- In high_security mode, omit anything uncertain, moderate, low-severity, or non-exploitable."""
+
     return [
         {"role": "system", "content": load_system_prompt()},
         {"role": "user", "content": user_prompt},
@@ -87,6 +93,17 @@ Important response rules:
 
 
 def _mode_block(scan_mode: ScanMode) -> str:
+    if scan_mode == ScanMode.HIGH_SECURITY:
+        return """- only concrete, dangerous security vulnerabilities with serious exploit potential
+- high-impact auth bypass, authz bypass, or privilege escalation
+- command execution, severe injection, unsafe deserialization, or XXE with meaningful impact
+- secrets exposure, session flaws, path traversal, SSRF, or crypto misuse when the impact looks severe
+- issues that would realistically matter to a human security reviewer triaging only the scariest findings
+
+Ignore medium/low issues, correctness bugs, maintainability, style, suspicious-but-weak patterns, and speculative concerns.
+Only report findings that should clearly be categorized as `security` and should clearly be rated `high` or `critical`.
+If the issue is security-relevant but not obviously dangerous, do not report it."""
+
     if scan_mode == ScanMode.SECURITY:
         return """- security vulnerabilities
 - dangerous input handling

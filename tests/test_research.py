@@ -1,5 +1,7 @@
 from pathlib import Path
 import asyncio
+import json
+import logging
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -20,6 +22,7 @@ from vibe_code_scanner.models import (
     TokenizerMode,
 )
 from vibe_code_scanner.research import PostScanResearcher
+from vibe_code_scanner.tracing import TraceRecorder
 
 
 def make_config(root: Path) -> AppConfig:
@@ -252,6 +255,87 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(results["results"][0]["url"], "https://owasp.org/www-project-web-security-testing-guide/")
         self.assertEqual(results["results"][0]["title"], "OWASP WSTG")
         self.assertIn("OWASP", results["results"][0]["snippet"])
+
+    def test_trace_recorder_captures_research_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = make_config(root)
+            config.trace_enabled = True
+            config.research_max_steps = 3
+            source_file = SourceFile(root, root / "app.py", "app.py", 32, "python")
+            report_path = root / "app.py.md"
+            report_path.write_text("# app.py\n\n## Findings\n\n- shell=True\n", encoding="utf-8")
+            file_results = [
+                FileScanResult(
+                    source_file=source_file,
+                    report_path=report_path,
+                    raw_artifact_path=None,
+                    chunks_scanned=1,
+                    findings=[
+                        NormalizedFinding(
+                            file_path="app.py",
+                            chunk_ids=[1],
+                            title="Potential command injection",
+                            category=Category.SECURITY,
+                            severity=Severity.HIGH,
+                            confidence=Confidence.HIGH,
+                            line_start=1,
+                            line_end=1,
+                            explanation="Test finding.",
+                            evidence="shell=True",
+                            remediation="Avoid shell execution.",
+                        )
+                    ],
+                    errors=[],
+                )
+            ]
+            trace_recorder = TraceRecorder(
+                root,
+                enabled=True,
+                logger=logging.getLogger("vibe_code_scanner"),
+                max_slots=2,
+            )
+            client = _StubClient(
+                [
+                    '{"action":"list_findings"}',
+                    '{"action":"read_file_report","file_path":"app.py"}',
+                    '{"action":"finish","report_markdown":"# Final Research Report\\n\\nDone."}',
+                ]
+            )
+
+            asyncio.run(
+                PostScanResearcher(config).run(
+                    client,
+                    file_results,
+                    ScanSourceMetadata(kind=ScanSourceKind.LOCAL_PATH, label=str(root)),
+                    trace_recorder=trace_recorder,
+                )
+            )
+
+            self.assertIsNotNone(trace_recorder.events_path)
+            events_path = trace_recorder.events_path
+            assert events_path is not None
+            events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        event_names = [event["event"] for event in events]
+        self.assertIn("research_step_started", event_names)
+        self.assertIn("research_request_started", event_names)
+        self.assertIn("research_request_completed", event_names)
+        self.assertIn("research_action_parsed", event_names)
+        self.assertIn("research_tool_executed", event_names)
+        self.assertIn("research_finished", event_names)
+        self.assertTrue(
+            any(
+                event["event"] == "research_request_started"
+                and event.get("slot_id") == 1
+                and event.get("step_index") == 1
+                for event in events
+            )
+        )
 
 
 class _StubClient:

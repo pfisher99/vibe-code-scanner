@@ -77,6 +77,40 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.research_max_tokens_per_request, 2048)
         self.assertEqual(config.research_thinking_token_budget, 8192)
 
+    def test_research_max_steps_is_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = build_config(
+                {
+                    "__config_dir__": str(root),
+                    "root_path": ".",
+                    "export_dir": "scan-runs",
+                    "base_url": "http://127.0.0.1:8000",
+                    "model_name": "Qwen3.5-9B-local",
+                    "include_globs": ["**/*.py"],
+                    "research_max_steps": 16,
+                }
+            )
+
+        self.assertEqual(config.research_max_steps, 16)
+
+    def test_high_security_scan_mode_is_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = build_config(
+                {
+                    "__config_dir__": str(root),
+                    "root_path": ".",
+                    "export_dir": "scan-runs",
+                    "base_url": "http://127.0.0.1:8000",
+                    "model_name": "Qwen3.5-9B-local",
+                    "include_globs": ["**/*.py"],
+                    "scan_mode": "high_security",
+                }
+            )
+
+        self.assertEqual(config.scan_mode.value, "high_security")
+
     def test_max_context_profile_rewrites_token_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
