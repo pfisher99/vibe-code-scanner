@@ -1,17 +1,15 @@
 # Vibe Code Scanner
 
-This is a local AI code scanner for messing around with source trees using a local OpenAI-compatible model endpoint like vLLM.
+Local AI code scanner for poking through a repo with a local OpenAI-compatible model endpoint like vLLM.
 
-Also, to be extremely clear: this is AI slop generated for fun. It is not pretending to be some polished enterprise security product. That said, it does actually work, and it is pretty decent for poking through a repo, chunking files, asking a local model for structured findings, and dumping the results into reports you can read later.
+This is AI slop generated for fun. It is not trying to cosplay as some serious enterprise security platform. It does, however, actually work, and it is pretty handy if you want to point a local model at a codebase, get structured findings back, and dump the whole thing into reports you can read afterward.
 
-The whole thing is aimed at local use on a machine with a roughly 16GB GPU and a small-ish model, not a hosted SaaS setup.
-
-TOML is used for config because Python 3.11 already ships `tomllib`, which keeps the project dependency-light and easy to tweak.
+This thing is mostly aimed at local use with a small-ish model on a box with around a 16GB GPU.
 
 ## What It Does
 
 - Walks a repo recursively
-- Skips common junk like `.git`, `node_modules`, `dist`, `build`, `bin`, `obj`, `.venv`, `__pycache__`, and similar folders
+- Skips common garbage like `.git`, `node_modules`, `dist`, `build`, `.venv`, `__pycache__`, and similar junk
 - Skips binary files and oversized files
 - Chunks source files by token budget
 - Supports chunk overlap
@@ -19,9 +17,10 @@ TOML is used for config because Python 3.11 already ships `tomllib`, which keeps
 - Expects strict JSON back
 - Deduplicates overlapping findings
 - Writes markdown reports plus machine-readable JSON
-- Can clone and scan a public GitHub repo directly
+- Can scan a local folder or clone and scan a public GitHub repo
+- Can narrow the scan to a subfolder with `--folder`
 - Has a post-scan research pass if you want the model to go back over its own output
-- Has trace/debug output so you can actually see what the scanner is doing
+- Has trace output so you can see what it is doing when a run gets weird
 
 ## Install
 
@@ -32,13 +31,19 @@ python -m pip install -e .
 ## Quick Start
 
 1. Start your local model server on `http://127.0.0.1:8000`.
-2. Copy or edit [`scanner.example.toml`](scanner.example.toml).
+2. Edit [`scanner.example.toml`](scanner.example.toml).
 3. Run the scanner.
 
-Scan a local repo:
+Scan a local folder:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml
+```
+
+Scan only part of a local folder:
+
+```bash
+vibe-code-scanner ../some-repo --folder src/server --config scanner.example.toml
 ```
 
 Scan a public GitHub repo:
@@ -47,94 +52,73 @@ Scan a public GitHub repo:
 vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --ref master --config scanner.example.toml --scan-mode security --max-concurrency 4
 ```
 
-Scan only a subfolder under a local repo or cloned GitHub repo:
+Scan only part of a cloned repo:
 
 ```bash
-vibe-code-scanner ../some-repo --folder src/server --config scanner.example.toml
 vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --folder app --config scanner.example.toml
 ```
 
-Turn on trace/debug output:
+Turn on trace:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --trace
 ```
 
-Run the post-scan research pass:
+Run the research pass after scanning:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --research
 ```
 
-Use the built-in web search path during research:
-
-```bash
-vibe-code-scanner ../some-repo --config scanner.example.toml --research --search-backend duckduckgo
-```
-
-Run only a random subset of files for a quick test:
+Do a small test run against a random subset:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --max-files 10
 ```
 
-Use the alternate big-window profile from config:
+Use the big context profile:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --max-context
 ```
 
-## The Current Vibe
+## Scan Modes
 
-The sample config is tuned around a local `Qwen3.5-9B-local` style setup.
+- `security`: security-focused scan
+- `high_security`: only the scary stuff, with hard filtering so only `security` findings rated `high` or `critical` survive
+- `security_and_quality`: broader scan that includes security, correctness, suspicious patterns, and maintainability hazards
 
-Normal mode in the sample config is basically:
+## Config
 
-- `max_tokens_per_request = 16384`
-- `chunk_target_tokens = 32768`
-- `thinking_token_budget = 8192`
-- `max_concurrent_requests = 4`
+Use [`scanner.example.toml`](scanner.example.toml) as the starting point.
 
-There is also an optional `--max-context` mode now. That pulls a separate token profile from config and rewrites the runtime settings.
+The knobs you will probably care about:
 
-In the sample config that means:
+- `base_url`
+- `model_name`
+- `tokenizer_mode`
+- `scan_mode`
+- `max_concurrent_requests`
+- `max_tokens_per_request`
+- `chunk_target_tokens`
+- `chunk_overlap_tokens`
+- `thinking_token_budget_enabled`
+- `thinking_token_budget`
+- `research`
+- `research_max_steps`
+- `research_max_tokens_per_request`
+- `research_thinking_token_budget`
+- `max_context_max_tokens_per_request`
+- `max_context_total_context_window_tokens`
+- `max_context_research_max_tokens_per_request`
+- `max_files`
+- `request_timeout_seconds`
 
-- total context window: `262144`
-- output tokens: `81920`
-- input chunk target: `180224`
-- thinking budget: disabled
-
-So yes, the scanner does the math for you instead of making you fiddle with it every run.
-
-## Important Config Knobs
-
-See [`scanner.example.toml`](scanner.example.toml).
-
-The ones that matter most:
-
-- `base_url`: where your local OpenAI-compatible endpoint lives
-- `model_name`: model id sent to the endpoint
-- `tokenizer_mode`: `vllm`, `auto`, or `heuristic`
-- `scan_mode`: `security`, `high_security`, or `security_and_quality`
-- `max_concurrent_requests`: how many requests stay in flight
-- `max_tokens_per_request`: output token cap for normal scan mode
-- `chunk_target_tokens`: input chunk size target
-- `chunk_overlap_tokens`: overlap between adjacent chunks
-- `thinking_token_budget_enabled`: whether to send `extra_body.thinking_token_budget`
-- `thinking_token_budget`: normal scan reasoning budget
-- `research`: whether to run the final research pass
-- `research_max_steps`: how many tool/action turns the research loop gets before it falls back
-- `research_max_tokens_per_request`: research-only output cap
-- `research_thinking_token_budget`: research-only reasoning budget
-- `max_context_max_tokens_per_request`: alternate output budget used by `--max-context`
-- `max_context_total_context_window_tokens`: alternate total window used by `--max-context`
-- `max_context_research_max_tokens_per_request`: optional research output cap when `--max-context` is on
-- `max_files`: random testing limit
-- `request_timeout_seconds`: per-request timeout
+The sample config is already set up around a local `Qwen3.5-9B-local` style setup.
 
 ## Output
 
-Each run gets its own timestamped folder under `export_dir`.
+Each run gets its own timestamped folder under `scan-runs`.
 
 ```text
 scan-runs/
@@ -159,82 +143,68 @@ scan-runs/
         final-report.json
 ```
 
-The useful bits are:
+The stuff you will actually open:
 
 - `index.md`: run summary
 - `findings.json`: full machine-readable output
-- `files/**/*.md`: per-file markdown reports
-- `raw/chunks/*.json`: raw per-chunk results
+- `files/**/*.md`: per-file reports
+- `raw/chunks/*.json`: raw per-chunk artifacts
 - `raw/trace/events.jsonl`: trace/debug stream for the run
 - `research/final-report.md`: final research report, if enabled
 
-## Trace Mode
+## Trace
 
-`--trace` is the general debug mode now.
+`--trace` is the general debug mode.
 
-It does three things:
+It will:
 
-- prints step-by-step trace lines in the terminal
-- tracks which concurrent request slot is doing what
-- stores richer trace metadata in chunk artifacts and `raw/trace/events.jsonl`
-- includes the research loop too, so you can see research step starts, model requests, parsed actions, tool executions, and whether it finished or fell back
+- print step-by-step trace lines in the terminal
+- show which request slot is handling what
+- write a run-level trace stream to `raw/trace/events.jsonl`
+- include research loop events too, not just chunk scan events
 
-So if a run feels stuck, weird, or noisy, this is the mode you want.
+If a run feels hung, noisy, or just plain cursed, this is the flag you want.
 
-## Research Mode
+## Research
 
 The first scan pass is from-memory only. No tools.
 
-If you enable `--research`, the scanner then does a second pass where the model can inspect:
+If you enable `--research`, the scanner does a second pass over its own output. The model can inspect:
 
 - the aggregated findings
 - per-file reports
 - optional web search results
 - fetched reference pages
 
-Right now the built-in no-extra-dependency search path is `duckduckgo`. `searxng` is still supported if you want to point at your own instance.
+Built-in web search can use `duckduckgo`. `searxng` is still there too if you want to point it at your own instance.
 
-Research is useful, but it is still very much “AI doing AI things,” so treat it like a second-pass assistant, not ground truth.
+Research is useful, but it is still very much AI doing AI things, so treat it like a second-pass assistant, not truth carved into stone.
 
-If the research pass keeps doing useful work but never quite gets to the final write-up, bump `research_max_steps` in config.
-
-## A Few Honest Notes
-
-- This is for fun. It is not a substitute for a real security review.
-- Small local models will still hallucinate, drift, or output garbage sometimes.
-- The scanner tries hard to force strict JSON and recover from messy outputs, but the model can still be annoying.
-- `thinking_token_budget` is not standard OpenAI API behavior. It only works when the endpoint supports it.
-- `research_max_steps` is configurable now. The sample config uses `12`, which gives the model more room for file reads, searches, fetches, and then actually finishing.
-- `--repo` is public GitHub only right now and depends on `git` being installed.
-- The built-in web search path is intentionally simple.
-- Broad file scanning is a tradeoff. The sample config is tuned to avoid a bunch of low-value junk.
-- Trace mode includes the research loop too, so `raw/trace/events.jsonl` will show research steps, parsed actions, tool executions, and whether the loop finished cleanly or fell back.
-
-## CLI
-
-```text
-usage: vibe-code-scanner [-h] [--config CONFIG] [--output OUTPUT]
-                         [--repo REPO] [--ref REF] [--folder START_FOLDER]
-                         [--base-url BASE_URL] [--model MODEL]
-                         [--max-context] [--trace]
-                         [--research] [--search-backend {none,searxng,duckduckgo}]
-                         [--search-base-url SEARCH_BASE_URL]
-                         [--scan-mode {security,high_security,security_and_quality}]
-                         [--api-style {chat_completions,responses}]
-                         [--max-concurrency MAX_CONCURRENCY]
-                         [--max-files MAX_FILES]
-                         [--log-level {DEBUG,INFO,WARNING,ERROR}]
-                         [root]
-```
+If it keeps doing useful work but never gets around to finishing, bump `research_max_steps`.
 
 ## Prompt Files
 
-The scanner prompt lives here:
+If you want to mess with the model behavior, start here:
 
 - [src/vibe_code_scanner/scanner_system_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_system_prompt.txt)
-
-The post-scan research prompt lives here:
-
 - [src/vibe_code_scanner/scanner_research_prompt.txt](/c:/Users/sqeak/source/vibe-code-scanner/src/vibe_code_scanner/scanner_research_prompt.txt)
 
-So if you want to keep tuning the model behavior, those are the first files to mess with.
+## Useful Flags
+
+- `--repo`: clone and scan a public GitHub repo
+- `--ref`: branch or tag for `--repo`
+- `--folder` or `--start-folder`: scan only a subfolder under the selected source
+- `--trace`: turn on trace/debug output
+- `--research`: run the final research pass
+- `--scan-mode`: pick `security`, `high_security`, or `security_and_quality`
+- `--max-files`: random subset for quick tests
+- `--max-context`: use the alternate large-context profile from config
+
+## A Few Honest Notes
+
+- This is for fun.
+- It is not a substitute for a real security review.
+- Small local models still hallucinate, drift, and sometimes dump garbage.
+- The scanner tries to keep them on the rails, but they still wander off.
+- `--repo` is public GitHub only right now.
+- Some runs will be surprisingly useful. Some will be a little dumb. That is just the game here.
