@@ -6,6 +6,22 @@ This is AI slop generated for fun. It is not trying to cosplay as some serious e
 
 This thing is mostly aimed at local use with a small-ish model on a box with around a 16GB GPU.
 
+The start of the blog series about building this thing is here: <https://thepatrickfisher.com/blog/computers/series-vibe-coding-sec-scan/>
+
+## Table of Contents
+
+- [What It Does](#what-it-does)
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [Scan Modes](#scan-modes)
+- [Config](#config)
+- [Output](#output)
+- [Trace](#trace)
+- [Research](#research)
+- [Prompt Files](#prompt-files)
+- [Useful Flags](#useful-flags)
+- [A Few Honest Notes](#a-few-honest-notes)
+
 ## What It Does
 
 - Walks a repo recursively

@@ -47,7 +47,7 @@ max_file_size_bytes = 1048576
 research = false
 # Give the research loop enough turns to inspect findings, read file reports,
 # do a few searches, fetch a source, and still have a chance to finish cleanly.
-research_max_steps = 24
+research_max_steps = 32
 # Optional final research tools for the post-scan pass.
 # `duckduckgo` works without any extra local service or Python dependency.
 # Use `searxng` only if you explicitly want to point at your own instance.
