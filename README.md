@@ -10,17 +10,19 @@ The start of the blog series about building this thing is here: <https://thepatr
 
 ## Table of Contents
 
-- [What It Does](#what-it-does)
-- [Install](#install)
-- [Quick Start](#quick-start)
-- [Scan Modes](#scan-modes)
-- [Config](#config)
-- [Output](#output)
-- [Trace](#trace)
-- [Research](#research)
-- [Prompt Files](#prompt-files)
-- [Useful Flags](#useful-flags)
-- [A Few Honest Notes](#a-few-honest-notes)
+- [Vibe Code Scanner](#vibe-code-scanner)
+  - [Table of Contents](#table-of-contents)
+  - [What It Does](#what-it-does)
+  - [Install](#install)
+  - [Quick Start](#quick-start)
+  - [Scan Modes](#scan-modes)
+  - [Config](#config)
+  - [Output](#output)
+  - [Trace](#trace)
+  - [Research](#research)
+  - [Prompt Files](#prompt-files)
+  - [Useful Flags](#useful-flags)
+  - [A Few Honest Notes](#a-few-honest-notes)
 
 ## What It Does
 
@@ -36,7 +38,8 @@ The start of the blog series about building this thing is here: <https://thepatr
 - Can scan a local folder or clone and scan a public GitHub repo
 - Can narrow the scan to a subfolder with `--folder`
 - Has a post-scan research pass if you want the model to go back over its own output
-- Has trace output so you can see what it is doing when a run gets weird
+- Prints concise progress in the terminal: completed files during scan, plus research steps and tool actions
+- Can persist extra trace artifacts when a run gets weird
 
 ## Install
 
@@ -74,7 +77,7 @@ Scan only part of a cloned repo:
 vibe-code-scanner --repo https://github.com/OWASP/NodeGoat --folder app --config scanner.example.toml
 ```
 
-Turn on trace:
+Persist extra trace artifacts:
 
 ```bash
 vibe-code-scanner ../some-repo --config scanner.example.toml --trace
@@ -170,16 +173,17 @@ The stuff you will actually open:
 
 ## Trace
 
-`--trace` is the general debug mode.
+Normal runs now print concise live progress in the terminal by default.
+
+`--trace` is the artifact-heavy debug mode.
 
 It will:
 
-- print step-by-step trace lines in the terminal
-- show which request slot is handling what
 - write a run-level trace stream to `raw/trace/events.jsonl`
+- persist request-slot and per-event detail in that trace stream
 - include research loop events too, not just chunk scan events
 
-If a run feels hung, noisy, or just plain cursed, this is the flag you want.
+If a run feels hung, noisy, or just plain cursed, this is the flag you want for persisted trace artifacts.
 
 ## Research
 
@@ -213,7 +217,7 @@ If you want to mess with the model behavior, start here:
 - `--repo`: clone and scan a public GitHub repo
 - `--ref`: branch or tag for `--repo`
 - `--folder` or `--start-folder`: scan only a subfolder under the selected source
-- `--trace`: turn on trace/debug output
+- `--trace`: persist trace/debug artifacts for the run
 - `--research`: run the final research pass
 - `--scan-mode`: pick `security`, `high_security`, or `security_and_quality`
 - `--max-files`: random subset for quick tests
@@ -223,7 +227,4 @@ If you want to mess with the model behavior, start here:
 
 - This is for fun.
 - It is not a substitute for a real security review.
-- Small local models still hallucinate, drift, and sometimes dump garbage.
-- The scanner tries to keep them on the rails, but they still wander off.
 - `--repo` is public GitHub only right now.
-- Some runs will be surprisingly useful. Some will be a little dumb. That is just the game here.

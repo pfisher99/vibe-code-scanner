@@ -1,4 +1,4 @@
-"""Trace helpers for slot-based debug output and run-level event capture."""
+"""Trace helpers for console progress output and optional run-level event capture."""
 
 from __future__ import annotations
 
@@ -8,6 +8,15 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+CONSOLE_RESEARCH_EVENTS = {
+    "research_step_started",
+    "research_action_parsed",
+    "research_feedback_injected",
+    "research_tool_executed",
+    "research_step_failed",
+    "research_finished",
+}
 
 
 class TraceRecorder:
@@ -46,6 +55,8 @@ class TraceRecorder:
         self._slot_queue.put_nowait(slot_id)
 
     async def record(self, event: str, **details: Any) -> None:
+        if _should_log_to_console(event):
+            self._logger.info("[%s] %s", ("trace" if self._enabled else "progress"), _format_trace_log(event, details))
         if not self._enabled or self.events_path is None:
             return
         payload = {
@@ -56,7 +67,6 @@ class TraceRecorder:
         async with self._write_lock:
             with self.events_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
-        self._logger.info("[trace] %s", _format_trace_log(event, details))
 
 
 def append_trace_step(trace_data, step: str, **details: Any) -> None:
@@ -79,11 +89,19 @@ def _format_trace_log(event: str, details: dict[str, Any]) -> str:
         "file_path",
         "chunk_index",
         "total_chunks",
+        "line_start",
+        "line_end",
+        "estimated_tokens",
+        "file_count",
+        "skipped_count",
+        "scanned_files",
+        "error_count",
         "status",
         "finding_count",
         "duration_ms",
         "step_index",
         "action",
+        "argument",
         "query",
         "url",
         "error",
@@ -93,3 +111,7 @@ def _format_trace_log(event: str, details: dict[str, Any]) -> str:
             extras.append(f"{key}={value}")
     suffix = f" ({', '.join(extras)})" if extras else ""
     return f"{slot_prefix}{event} {label}".strip() + suffix
+
+
+def _should_log_to_console(event: str) -> bool:
+    return event in CONSOLE_RESEARCH_EVENTS

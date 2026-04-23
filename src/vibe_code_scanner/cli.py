@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--trace",
         action="store_true",
         default=None,
-        help="Enable slot-based trace logging and persist rich trace metadata in raw artifacts.",
+        help="Persist slot-based trace logs and rich trace metadata in raw artifacts.",
     )
     parser.add_argument(
         "--research",

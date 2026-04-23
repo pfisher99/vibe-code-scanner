@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 from dataclasses import replace
 from html.parser import HTMLParser
 import json
@@ -17,6 +18,7 @@ from typing import Any
 
 from .chunking import chunk_text
 from .client import ModelClientError, OpenAICompatibleClient
+from .discovery import discover_source_files, read_text_file
 from .models import (
     AppConfig,
     FileScanResult,
@@ -25,6 +27,7 @@ from .models import (
     ResearchToolCall,
     ScanSourceMetadata,
     SearchBackend,
+    SourceFile,
 )
 from .parser import ResponseParseError, load_json_object
 from .tokenization import build_token_counter
@@ -39,11 +42,39 @@ MIN_FILE_REPORTS_BEFORE_FINISH = 2
 MIN_SOURCE_FILE_INSPECTIONS_BEFORE_FINISH = 1
 MIN_WEB_SEARCHES_BEFORE_FINISH = 1
 MIN_FETCHES_BEFORE_FINISH = 1
+MAX_CODE_SEARCH_MATCHES = 60
+MAX_CODE_SEARCH_MATCHES_PER_FILE = 8
+MAX_TRACE_DEFINITIONS = 20
+MAX_TRACE_CALLS = 40
+MAX_TRACE_REFERENCES = 20
+CODE_SEARCH_CONTEXT_RADIUS = 2
+TRACE_CONTEXT_RADIUS = 2
+MAX_MATCH_LINE_CHARS = 240
 SOURCE_REINSPECTION_SEVERITIES = {"critical", "high"}
 TAG_PATTERN = re.compile(r"(?is)<[^>]+>")
 SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?>.*?</\1>")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 QUOTED_DEPENDENCY_PATTERN = re.compile(r'"([^"]+)"')
+IDENTIFIER_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+CALL_PATTERN_TEMPLATE = r"\b{symbol}\s*(?:!?\s*)\("
+COMMENT_ONLY_PREFIXES = ("#", "//", "/*", "*", "--")
+DEFINITION_PATTERNS = (
+    re.compile(r"^\s*(?:async\s+)?def\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("),
+    re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("),
+    re.compile(r"^\s*func\s*(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("),
+    re.compile(r"^\s*(?:export\s+)?function\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("),
+    re.compile(
+        r"^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+        r"(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_][A-Za-z0-9_]*\s*=>)"
+    ),
+    re.compile(r"^\s*(?:export\s+)?class\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b"),
+    re.compile(
+        r"^\s*(?:public|private|protected|internal|static|final|virtual|override|inline|async|export|\s)+"
+        r"[\w<>\[\],?*&:.]+\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{"
+    ),
+    re.compile(r"^\s*(?:async\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{"),
+)
+NON_DEFINITION_KEYWORDS = {"if", "for", "while", "switch", "catch", "return", "else"}
 
 
 class ResearchError(RuntimeError):
@@ -54,6 +85,8 @@ class PostScanResearcher:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
         self._token_counter = build_token_counter(config)
+        self._repository_source_files_cache: list[SourceFile] | None = None
+        self._repository_source_file_map_cache: dict[str, SourceFile] | None = None
 
     async def run(
         self,
@@ -73,6 +106,7 @@ class PostScanResearcher:
         ]
         references_by_url: dict[str, ResearchReference] = {}
         files_consulted: set[str] = set()
+        file_reports_consulted: set[str] = set()
         source_files_consulted: set[str] = set()
         search_queries: list[str] = []
         tool_calls: list[ResearchToolCall] = []
@@ -151,13 +185,14 @@ class PostScanResearcher:
                     step_index=step,
                     slot_id=slot_id,
                     action=action["action"],
+                    argument=_research_action_argument(action),
                 )
 
             corrective_feedback = self._pre_action_feedback(
                 action,
                 file_results,
                 listed_findings=listed_findings,
-                files_consulted=files_consulted,
+                file_reports_consulted=file_reports_consulted,
                 source_files_consulted=source_files_consulted,
                 references_by_url=references_by_url,
                 successful_searches=successful_searches,
@@ -217,12 +252,19 @@ class PostScanResearcher:
                     step_index=step,
                     slot_id=slot_id,
                     action=action["action"],
-                    query=search_query,
+                    argument=tool_argument,
+                    query=(
+                        tool_argument
+                        if action["action"] in {"search_web", "search_code", "trace_symbol"}
+                        else None
+                    ),
                     url=(tool_argument if action["action"] == "fetch_url" else None),
                     status=("error" if "error" in tool_result else "ok"),
                 )
             if consulted_file is not None:
                 files_consulted.add(consulted_file)
+                if action["action"] == "read_file_report":
+                    file_reports_consulted.add(consulted_file)
                 if action["action"] == "read_source_file":
                     source_files_consulted.add(consulted_file)
             if search_query is not None:
@@ -294,6 +336,9 @@ class PostScanResearcher:
             '- `list_findings`: list the scanner findings across files',
             '- `read_file_report`: read a specific per-file markdown report by relative file path, with optional `section_index` when paged',
             '- `read_source_file`: read the original source for a specific file, but only when that file has at least one `critical` or `high` finding',
+            '- `read_repository_file`: read any eligible repository file by relative path, with optional `section_index` when paged',
+            '- `search_code`: search eligible repository files for a string, symbol, or code fragment',
+            '- `trace_symbol`: find likely definitions, call sites, and callers for a symbol or function name',
             '- `fetch_url`: fetch and summarize a public URL, with optional `section_index` when paged',
         ]
         if self._search_is_available():
@@ -355,7 +400,7 @@ class PostScanResearcher:
 
         return f"""Completed scan source: {source_metadata.label}
 Research goal: perform a final deep research pass over the scanner's own output.
-The initial scan was completed without tools. In this phase you may inspect scan outputs, reopen original source for `critical` or `high` findings, and optionally use web tools before writing a final report.
+The initial scan was completed without tools. In this phase you may inspect scan outputs, reopen original source for `critical` or `high` findings, inspect other repository files when needed, trace call paths across the repo, and optionally use web tools before writing a final report.
 
 Summary:
 - Total files with findings: {sum(1 for result in file_results if result.findings)}
@@ -388,6 +433,7 @@ Final report rules:
 - Make the final report useful to a human reviewer, not just a restatement of the raw findings.
 - Tool results may be paged to stay within the request token budget. If a result says `truncated: true` and provides `next_section_index`, call the same tool again with that `section_index` if you need more context.
 - Only use `read_source_file` for files with `critical` or `high` findings. Prefer the recommended source reinspection files first, and do not reopen source for `medium`, `low`, or `info`-only findings.
+- Use `read_repository_file`, `search_code`, and `trace_symbol` when a finding depends on surrounding helper code, definitions in other files, or a cross-file call path.
 - Use web search to answer concrete questions: is this a real vulnerability pattern, what is the common impact, what is the official remediation, and for dependency issues what advisory or latest-version guidance exists.
 
 When you are ready, return a `finish` action with a complete markdown report."""
@@ -412,6 +458,22 @@ When you are ready, return a `finish` action with a complete markdown report."""
             result = self._read_source_file(file_results, file_path, section_index=section_index)
             consulted_file = file_path if "error" not in result else None
             return result, file_path or None, [], consulted_file, None
+        if action_name == "read_repository_file":
+            file_path = str(action.get("file_path", "")).strip()
+            section_index = self._parse_section_index(action.get("section_index", 1))
+            result = self._read_repository_file(file_path, section_index=section_index)
+            consulted_file = file_path if "error" not in result else None
+            return result, file_path or None, [], consulted_file, None
+        if action_name == "search_code":
+            query = str(action.get("query", "")).strip()
+            section_index = self._parse_section_index(action.get("section_index", 1))
+            result = self._search_code(query, section_index=section_index)
+            return result, query or None, [], None, None
+        if action_name == "trace_symbol":
+            symbol = str(action.get("symbol", "")).strip()
+            section_index = self._parse_section_index(action.get("section_index", 1))
+            result = self._trace_symbol(symbol, section_index=section_index)
+            return result, symbol or None, [], None, None
         if action_name == "search_web":
             query = str(action.get("query", "")).strip()
             result = await self._search_web(query)
@@ -565,6 +627,215 @@ When you are ready, return a `finish` action with a complete markdown report."""
                 ],
             }
         return {"error": f"Unknown file path '{file_path}'."}
+
+    def _read_repository_file(self, file_path: str, *, section_index: int = 1) -> dict[str, Any]:
+        if not file_path:
+            return {"error": "file_path is required for read_repository_file."}
+        source_file = self._repository_source_file_map().get(file_path)
+        if source_file is None:
+            return {"error": f"Unknown repository file path '{file_path}'."}
+        source_text = read_text_file(source_file)
+        numbered_source = self._add_line_numbers(source_text)
+        sections = self._paginate_text(numbered_source, self._tool_section_token_budget())
+        if section_index > len(sections):
+            return {
+                "error": (
+                    f"section_index {section_index} is out of range for {file_path};"
+                    f" available sections: 1-{len(sections)}."
+                )
+            }
+        return {
+            "file_path": file_path,
+            "language_hint": source_file.language_hint,
+            "section_index": section_index,
+            "total_sections": len(sections),
+            "file_contents": _truncate(sections[section_index - 1], MAX_SOURCE_FILE_CHARS),
+            "truncated": len(sections) > 1,
+            "next_section_index": (section_index + 1 if section_index < len(sections) else None),
+        }
+
+    def _search_code(self, query: str, *, section_index: int = 1) -> dict[str, Any]:
+        if not query:
+            return {"error": "query is required for search_code."}
+        smart_case = any(character.isupper() for character in query if character.isalpha())
+        query_for_match = query if smart_case else query.lower()
+        matches: list[str] = []
+        files_with_matches: set[str] = set()
+        total_match_count = 0
+        capped = False
+
+        for source_file in self._repository_source_files():
+            lines = read_text_file(source_file).splitlines()
+            per_file_matches = 0
+            for line_number, line in enumerate(lines, start=1):
+                haystack = line if smart_case else line.lower()
+                if query_for_match not in haystack:
+                    continue
+                files_with_matches.add(source_file.relative_path)
+                per_file_matches += 1
+                total_match_count += 1
+                matches.append(
+                    "\n".join(
+                        [
+                            f"- {source_file.relative_path}:{line_number}",
+                            f"  Match: {_truncate(line.strip(), MAX_MATCH_LINE_CHARS)}",
+                            "  Context:",
+                            textwrap.indent(
+                                self._render_line_window(lines, line_number, CODE_SEARCH_CONTEXT_RADIUS),
+                                "    ",
+                            ),
+                        ]
+                    )
+                )
+                if len(matches) >= MAX_CODE_SEARCH_MATCHES:
+                    capped = True
+                    break
+                if per_file_matches >= MAX_CODE_SEARCH_MATCHES_PER_FILE:
+                    break
+            if capped:
+                break
+
+        if not matches:
+            return {
+                "query": query,
+                "match_count": 0,
+                "files_with_matches": 0,
+                "matched_files": [],
+                "section_index": 1,
+                "total_sections": 1,
+                "search_results": "No repository matches found.",
+                "truncated": False,
+                "next_section_index": None,
+                "capped": False,
+            }
+
+        body = "\n\n".join(matches)
+        sections = self._paginate_text(body, self._tool_section_token_budget())
+        if section_index > len(sections):
+            return {
+                "error": (
+                    f"section_index {section_index} is out of range for search_code query '{query}';"
+                    f" available sections: 1-{len(sections)}."
+                )
+            }
+        return {
+            "query": query,
+            "match_count": total_match_count,
+            "files_with_matches": len(files_with_matches),
+            "matched_files": sorted(files_with_matches)[:20],
+            "section_index": section_index,
+            "total_sections": len(sections),
+            "search_results": _truncate(sections[section_index - 1], MAX_FETCH_CONTENT_CHARS),
+            "truncated": len(sections) > 1,
+            "next_section_index": (section_index + 1 if section_index < len(sections) else None),
+            "capped": capped,
+        }
+
+    def _trace_symbol(self, symbol: str, *, section_index: int = 1) -> dict[str, Any]:
+        if not symbol:
+            return {"error": "symbol is required for trace_symbol."}
+        normalized_symbol = _normalize_trace_symbol(symbol)
+        if not normalized_symbol:
+            return {"error": f"Could not derive a valid identifier from '{symbol}'."}
+
+        definition_entries: list[dict[str, str | int | None]] = []
+        call_entries: list[dict[str, str | int | None]] = []
+        reference_entries: list[dict[str, str | int | None]] = []
+        files_touched: set[str] = set()
+        definition_hit_count = 0
+        call_hit_count = 0
+        reference_hit_count = 0
+
+        for source_file in self._repository_source_files():
+            lines = read_text_file(source_file).splitlines()
+            definition_index = self._definition_index_for_lines(lines)
+            for line_number, line in enumerate(lines, start=1):
+                kind = self._classify_symbol_occurrence(line, normalized_symbol)
+                if kind is None:
+                    continue
+                stripped = line.strip()
+                if kind != "definition" and stripped.startswith(COMMENT_ONLY_PREFIXES):
+                    continue
+                files_touched.add(source_file.relative_path)
+                entry = {
+                    "file_path": source_file.relative_path,
+                    "line_number": line_number,
+                    "line_preview": _truncate(stripped, MAX_MATCH_LINE_CHARS),
+                    "enclosing_symbol": self._enclosing_symbol_name(definition_index, line_number),
+                    "snippet": self._render_line_window(lines, line_number, TRACE_CONTEXT_RADIUS),
+                }
+                if kind == "definition":
+                    definition_hit_count += 1
+                    if len(definition_entries) < MAX_TRACE_DEFINITIONS:
+                        definition_entries.append(entry)
+                elif kind == "call":
+                    call_hit_count += 1
+                    if len(call_entries) < MAX_TRACE_CALLS:
+                        call_entries.append(entry)
+                else:
+                    reference_hit_count += 1
+                    if len(reference_entries) < MAX_TRACE_REFERENCES:
+                        reference_entries.append(entry)
+
+        capped = (
+            definition_hit_count > len(definition_entries)
+            or call_hit_count > len(call_entries)
+            or reference_hit_count > len(reference_entries)
+        )
+        caller_labels = _dedupe_preserving_order(
+            [
+                f"{entry['enclosing_symbol']} ({entry['file_path']})"
+                for entry in call_entries
+                if isinstance(entry.get("enclosing_symbol"), str)
+                and entry["enclosing_symbol"]
+                and entry["enclosing_symbol"] != normalized_symbol
+            ]
+        )[:15]
+
+        lines: list[str] = [
+            f"Trace symbol: {normalized_symbol}",
+            f"Definition hits: {definition_hit_count}",
+            f"Call hits: {call_hit_count}",
+            f"Other reference hits: {reference_hit_count}",
+            f"Files touched: {len(files_touched)}",
+        ]
+        if caller_labels:
+            lines.extend(["", "Potential callers:"])
+            lines.extend(f"- {label}" for label in caller_labels)
+        if definition_entries:
+            lines.extend(["", "Definitions:"])
+            lines.extend(self._format_trace_entries(definition_entries))
+        if call_entries:
+            lines.extend(["", "Calls:"])
+            lines.extend(self._format_trace_entries(call_entries))
+        if reference_entries:
+            lines.extend(["", "Other references:"])
+            lines.extend(self._format_trace_entries(reference_entries))
+        if len(lines) == 5:
+            lines.extend(["", "No repository definitions or references were found."])
+
+        sections = self._paginate_text("\n".join(lines), self._tool_section_token_budget())
+        if section_index > len(sections):
+            return {
+                "error": (
+                    f"section_index {section_index} is out of range for trace_symbol '{normalized_symbol}';"
+                    f" available sections: 1-{len(sections)}."
+                )
+            }
+        return {
+            "symbol": normalized_symbol,
+            "definition_hits": definition_hit_count,
+            "call_hits": call_hit_count,
+            "reference_hits": reference_hit_count,
+            "files_touched": sorted(files_touched)[:20],
+            "candidate_callers": caller_labels,
+            "section_index": section_index,
+            "total_sections": len(sections),
+            "trace_report": _truncate(sections[section_index - 1], MAX_FETCH_CONTENT_CHARS),
+            "truncated": len(sections) > 1,
+            "next_section_index": (section_index + 1 if section_index < len(sections) else None),
+            "capped": capped,
+        }
 
     async def _search_web(self, query: str) -> dict[str, Any]:
         if not query:
@@ -740,7 +1011,7 @@ When you are ready, return a `finish` action with a complete markdown report."""
         file_results: list[FileScanResult],
         *,
         listed_findings: bool,
-        files_consulted: set[str],
+        file_reports_consulted: set[str],
         source_files_consulted: set[str],
         references_by_url: dict[str, ResearchReference],
         successful_searches: int,
@@ -780,9 +1051,13 @@ When you are ready, return a `finish` action with a complete markdown report."""
             MIN_FILE_REPORTS_BEFORE_FINISH,
             sum(1 for result in file_results if result.findings),
         )
-        if len(files_consulted) < required_file_reports:
+        if len(file_reports_consulted) < required_file_reports:
             next_file = next(
-                (file_path for file_path in self._recommended_file_paths(file_results) if file_path not in files_consulted),
+                (
+                    file_path
+                    for file_path in self._recommended_file_paths(file_results)
+                    if file_path not in file_reports_consulted
+                ),
                 None,
             )
             if next_file is None:
@@ -790,7 +1065,7 @@ When you are ready, return a `finish` action with a complete markdown report."""
                     (
                         result.source_file.relative_path
                         for result in file_results
-                        if result.findings and result.source_file.relative_path not in files_consulted
+                        if result.findings and result.source_file.relative_path not in file_reports_consulted
                     ),
                     None,
                 )
@@ -801,7 +1076,7 @@ When you are ready, return a `finish` action with a complete markdown report."""
             )
             return (
                 "Do not finish yet. Read more of the actual scanner outputs first."
-                f" You have only consulted `{len(files_consulted)}` file report(s), and this run requires"
+                f" You have only consulted `{len(file_reports_consulted)}` file report(s), and this run requires"
                 f" at least `{required_file_reports}` before finishing.\n"
                 f"Return JSON only, for example: {example}"
             )
@@ -980,6 +1255,71 @@ When you are ready, return a `finish` action with a complete markdown report."""
             return [stripped]
         return [chunk.text.strip() for chunk in chunks if chunk.text.strip()]
 
+    def _repository_source_files(self) -> list[SourceFile]:
+        if self._repository_source_files_cache is None:
+            self._repository_source_files_cache, _ = discover_source_files(self._config)
+        return self._repository_source_files_cache
+
+    def _repository_source_file_map(self) -> dict[str, SourceFile]:
+        if self._repository_source_file_map_cache is None:
+            self._repository_source_file_map_cache = {
+                source_file.relative_path: source_file for source_file in self._repository_source_files()
+            }
+        return self._repository_source_file_map_cache
+
+    def _definition_index_for_lines(self, lines: list[str]) -> list[tuple[int, str]]:
+        definitions: list[tuple[int, str]] = []
+        for line_number, line in enumerate(lines, start=1):
+            definition_name = _extract_definition_name(line)
+            if definition_name:
+                definitions.append((line_number, definition_name))
+        return definitions
+
+    def _enclosing_symbol_name(self, definitions: list[tuple[int, str]], line_number: int) -> str | None:
+        if not definitions:
+            return None
+        definition_lines = [entry[0] for entry in definitions]
+        index = bisect_right(definition_lines, line_number) - 1
+        if index < 0:
+            return None
+        return definitions[index][1]
+
+    def _classify_symbol_occurrence(self, line: str, symbol: str) -> str | None:
+        if not re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", line):
+            return None
+        if _line_matches_symbol_definition(line, symbol):
+            return "definition"
+        if re.search(CALL_PATTERN_TEMPLATE.format(symbol=re.escape(symbol)), line):
+            return "call"
+        return "reference"
+
+    def _render_line_window(self, lines: list[str], line_number: int, context_radius: int) -> str:
+        start = max(1, line_number - context_radius)
+        end = min(len(lines), line_number + context_radius)
+        window = [
+            f"{current_line:>6}: {lines[current_line - 1]}"
+            for current_line in range(start, end + 1)
+        ]
+        return "\n".join(window)
+
+    def _format_trace_entries(self, entries: list[dict[str, str | int | None]]) -> list[str]:
+        formatted: list[str] = []
+        for entry in entries:
+            file_path = str(entry["file_path"])
+            line_number = int(entry["line_number"])
+            line_preview = str(entry["line_preview"])
+            enclosing_symbol = str(entry["enclosing_symbol"]) if entry.get("enclosing_symbol") else None
+            formatted.append(f"- {file_path}:{line_number}")
+            if enclosing_symbol:
+                formatted.append(f"  Enclosing symbol: {enclosing_symbol}")
+            formatted.append(f"  Match: {line_preview}")
+            formatted.append("  Context:")
+            formatted.append(textwrap.indent(str(entry["snippet"]), "    "))
+            formatted.append("")
+        while formatted and not formatted[-1].strip():
+            formatted.pop()
+        return formatted
+
     def _add_line_numbers(self, text: str) -> str:
         lines = text.splitlines()
         if not lines:
@@ -1112,6 +1452,57 @@ def _clean_html_text(raw_text: str) -> str:
     without_tags = TAG_PATTERN.sub(" ", without_scripts)
     normalized = WHITESPACE_PATTERN.sub(" ", unescape(without_tags))
     return normalized.strip()
+
+
+def _extract_definition_name(line: str) -> str | None:
+    for pattern in DEFINITION_PATTERNS:
+        match = pattern.search(line)
+        if not match:
+            continue
+        name = match.group("name")
+        if name in NON_DEFINITION_KEYWORDS:
+            return None
+        return name
+    return None
+
+
+def _line_matches_symbol_definition(line: str, symbol: str) -> bool:
+    return _extract_definition_name(line) == symbol
+
+
+def _normalize_trace_symbol(symbol: str) -> str:
+    candidate = symbol.strip()
+    if candidate.endswith("("):
+        candidate = candidate[:-1].rstrip()
+    if candidate.endswith("()"):
+        candidate = candidate[:-2].rstrip()
+    if "::" in candidate:
+        candidate = candidate.rsplit("::", 1)[-1]
+    if "." in candidate:
+        candidate = candidate.rsplit(".", 1)[-1]
+    match = IDENTIFIER_PATTERN.search(candidate)
+    return match.group(0) if match else ""
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _research_action_argument(action: dict[str, Any]) -> str | None:
+    for key in ("file_path", "query", "symbol", "url"):
+        value = action.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
 
 
 def _truncate(text: str, limit: int) -> str:

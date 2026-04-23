@@ -76,7 +76,7 @@ class RepositoryScanner:
         source_files, skipped_paths = self._apply_max_files_limit(source_files, skipped_paths)
         self._total_files = len(source_files)
         self._completed_files = 0
-        LOGGER.info("Discovered %s files and skipped %s paths.", len(source_files), len(skipped_paths))
+        LOGGER.debug("Discovered %s files and skipped %s paths.", len(source_files), len(skipped_paths))
         await self._trace(
             "discovery_completed",
             label=self._source_metadata.label,
@@ -89,7 +89,7 @@ class RepositoryScanner:
         file_results = await asyncio.gather(*tasks)
         research_summary = None
         if self._config.research_enabled:
-            LOGGER.info("Running post-scan research loop.")
+            LOGGER.debug("Running post-scan research loop.")
             await self._trace("research_started", label=self._source_metadata.label)
             research_summary = await PostScanResearcher(self._config).run(
                 client,
@@ -132,7 +132,7 @@ class RepositoryScanner:
     ) -> FileScanResult:
         line_count = 0
         try:
-            LOGGER.info("Scanning %s", source_file.relative_path)
+            LOGGER.debug("Scanning %s", source_file.relative_path)
             await self._trace("file_started", label=source_file.relative_path, file_path=source_file.relative_path)
             errors: list[str] = []
 
@@ -468,7 +468,7 @@ class RepositoryScanner:
             for source_file in omitted_files
         )
         limited_skips.sort(key=lambda item: item.relative_path)
-        LOGGER.info(
+        LOGGER.debug(
             "Limiting scan to a random subset of %s file(s) out of %s eligible files.",
             len(limited_source_files),
             len(source_files),

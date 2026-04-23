@@ -110,6 +110,27 @@ class ScannerTests(unittest.TestCase):
             joined_logs = "\n".join(captured_logs.output)
             self.assertIn("Completed app.py: 2 lines scanned. 0/1 files remaining (0.0% remaining).", joined_logs)
 
+    def test_repository_scanner_keeps_console_output_concise_without_trace_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "app.py").write_text("print('progress')\n", encoding="utf-8")
+            config = make_config(root)
+
+            async def fake_analyze_messages(_self, _messages, **_kwargs):
+                return ('{"findings":[]}', {"id": "fake-response"}, None)
+
+            with patch(
+                "vibe_code_scanner.client.OpenAICompatibleClient.analyze_messages",
+                new=fake_analyze_messages,
+            ), self.assertLogs("vibe_code_scanner", level="INFO") as captured_logs:
+                asyncio.run(RepositoryScanner(config).run())
+
+            joined_logs = "\n".join(captured_logs.output)
+            self.assertIn("Completed app.py: 1 lines scanned. 0/1 files remaining (0.0% remaining).", joined_logs)
+            self.assertIn("Finished scan. Results written to", joined_logs)
+            self.assertNotIn("chunk_request_started", joined_logs)
+            self.assertNotIn("scan_started", joined_logs)
+
     def test_repository_scanner_writes_trace_data_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
